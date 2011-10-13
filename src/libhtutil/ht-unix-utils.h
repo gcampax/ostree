@@ -34,6 +34,12 @@
 
 G_BEGIN_DECLS
 
+gboolean ht_util_filename_has_dotdot (const char *path);
+
+GPtrArray *ht_util_sort_filenames_by_component_length (GPtrArray *files);
+
+int ht_util_count_filename_components (const char *path);
+
 int ht_util_open_file_read (const char *path, GError **error);
 
 int ht_util_open_file_read_at (int dirfd, const char *name, GError **error);

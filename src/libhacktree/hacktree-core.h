@@ -18,7 +18,6 @@
  *
  * Author: Colin Walters <walters@verbum.org>
  */
-/* hacktree-repo.h */
 
 #ifndef _HACKTREE_CORE
 #define _HACKTREE_CORE
@@ -26,6 +25,48 @@
 #include <htutil.h>
 
 G_BEGIN_DECLS
+
+#define HACKTREE_EMPTY_STRING_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+typedef enum {
+  HACKTREE_SERIALIZED_TREE_VARIANT = 1,
+  HACKTREE_SERIALIZED_COMMIT_VARIANT = 2
+  HACKTREE_SERIALIZED_XATTRS_VARIANT = 3
+} HacktreeSerializedVariantType;
+
+#define HACKTREE_SERIALIZED_VARIANT_FORMAT G_VARIANT_TYPE("(uv)")
+
+/*
+ * Tree objects:
+ * u - Version
+ * a{sv} - Metadata
+ * a(ss) - array of (checksum, filename) for files
+ * as - array of tree checksums for directories
+ * a(ssuay) - array of (dirname, uid, gid, mode, xattr_checksum) for directories
+ */
+#define HACKTREE_TREE_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}a(ss)asa(suuus)")
+/*
+ * Commit objects:
+ * u - Version
+ * a{sv} - Metadata
+ * s - subject 
+ * s - body
+ * t - Timestamp in seconds since the epoch (UTC)
+ * s - Tree SHA256
+ */
+#define HACKTREE_COMMIT_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}ssts)")
+
+/*
+ * xattr objects:
+ * u - Version
+ * ay - data
+ */
+#define HACKTREE_XATTR_GVARIANT_FORMAT G_VARIANT_TYPE("(uay)")
+
+gboolean   hacktree_get_xattrs_for_directory (const char *path,
+                                              char      **out_xattrs,
+                                              gsize      *out_len,
+                                              GError    **error);
 
 gboolean hacktree_stat_and_checksum_file (int dirfd, const char *path,
                                           GChecksum **out_checksum,

@@ -30,6 +30,69 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+static int
+compare_filenames_by_component_length (const char *a,
+                                       const char *b)
+{
+  char *a_slash, *b_slash;
+
+  a_slash = strchr (a, '/');
+  b_slash = strchr (b, '/');
+  while (a_slash && b_slash)
+    {
+      a = a_slash + 1;
+      b = b_slash + 1;
+      a_slash = strchr (a, '/');
+      b_slash = strchr (b, '/');
+    }
+  if (a_slash)
+    return -1;
+  else if (b_slash)
+    return 1;
+  else
+    return 0;
+}
+
+GPtrArray *
+ht_util_sort_filenames_by_component_length (GPtrArray *files)
+{
+  GPtrArray *array = g_ptr_array_sized_new (files->len);
+  memcpy (array->pdata, files->pdata, sizeof (gpointer) * files->len);
+  g_ptr_array_sort (array, (GCompareFunc) compare_filenames_by_component_length);
+  return array;
+}
+
+int
+ht_util_count_filename_components (const char *path)
+{
+  int i = 0;
+  char *p;
+
+  while (path)
+    {
+      i++;
+      path = strchr (path, '/');
+      if (path)
+        path++;
+    }
+  return i;
+}
+
+gboolean
+ht_util_filename_has_dotdot (const char *path)
+{
+  char *p;
+  char last;
+
+  if (strcmp (path, "..") == 0)
+    return TRUE;
+  if (g_str_has_prefix (path, "../"))
+    return TRUE;
+  p = strstr (path, "/..");
+  last = *(p + 1);
+  return last == '\0' || last == '/';
+}
+
 void
 ht_util_set_error_from_errno (GError **error,
                               gint     saved_errno)
