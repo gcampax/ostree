@@ -39,10 +39,12 @@ typedef struct _HacktreeRepoPrivate HacktreeRepoPrivate;
 
 struct _HacktreeRepoPrivate {
   char *path;
+  char *head_ref_path;
   char *index_path;
   char *objects_path;
 
   gboolean inited;
+  char *current_head;
 };
 
 static void
@@ -52,8 +54,10 @@ hacktree_repo_finalize (GObject *object)
   HacktreeRepoPrivate *priv = GET_PRIVATE (self);
 
   g_free (priv->path);
+  g_free (priv->head_ref_path);
   g_free (priv->index_path);
   g_free (priv->objects_path);
+  g_free (priv->current_head);
 
   G_OBJECT_CLASS (hacktree_repo_parent_class)->finalize (object);
 }
@@ -114,6 +118,7 @@ hacktree_repo_constructor (GType                  gtype,
 
   g_assert (priv->path != NULL);
 
+  priv->head_ref_path = g_build_filename (priv->path, HACKTREE_REPO_DIR, "HEAD", NULL);
   priv->objects_path = g_build_filename (priv->path, HACKTREE_REPO_DIR, "objects", NULL);
   priv->index_path = g_build_filename (priv->path, HACKTREE_REPO_DIR, "index", NULL);
 
@@ -153,10 +158,41 @@ hacktree_repo_new (const char *path)
   return g_object_new (HACKTREE_TYPE_REPO, "path", path, NULL);
 }
 
+static gboolean
+parse_checksum_file (HacktreeRepo   *repo,
+                     const char     *path,
+                     char          **sha256,
+                     GError        **error)
+{
+  HacktreeRepoPrivate *priv = GET_PRIVATE (self);
+  GError temp_error = NULL;
+  gboolean ret = FALSE;
+
+  if (!(*sha256 = ht_util_get_file_contents_utf8 (path, &temp_error)))
+    {
+      if (g_error_matches (temp_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+        {
+          g_clear_error (&temp_error);
+        }
+      else
+        {
+          g_propagate_error (error, temp_error);
+          goto out;
+        }
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
 gboolean
 hacktree_repo_check (HacktreeRepo *self, GError **error)
 {
   HacktreeRepoPrivate *priv = GET_PRIVATE (self);
+
+  if (priv->inited)
+    return TRUE;
 
   if (!g_file_test (priv->objects_path, G_FILE_TEST_IS_DIR))
     {
@@ -166,7 +202,8 @@ hacktree_repo_check (HacktreeRepo *self, GError **error)
     }
   
   priv->inited = TRUE;
-  return TRUE;
+
+  return parse_checksum_file (repo, priv->head_ref_path, &priv->current_head, error);
 }
 
 static gboolean
@@ -286,26 +323,37 @@ import_directory (HacktreeRepo  *self,
 }
 
 static char *
+get_object_path_for_checksum (HacktreeRepo  *self,
+                              const char    *checksum)
+{
+  HacktreeRepoPrivate *priv = GET_PRIVATE (self);
+  char *checksum_prefix;
+  char *ret;
+
+  checksum_prefix = g_strndup (checksum, 2);
+  ret = g_build_filename (priv->objects_path, checksum_prefix, checksum + 2, NULL);
+  g_free (checksum_prefix);
+ 
+  return ret;
+}
+
+static char *
 prepare_dir_for_checksum_get_object_path (HacktreeRepo *self,
                                           GChecksum    *checksum,
                                           GError      **error)
 {
   HacktreeRepoPrivate *priv = GET_PRIVATE (self);
-  char *checksum_prefix = NULL;
   char *checksum_dir = NULL;
   char *object_path = NULL;
   GError *temp_error = NULL;
 
-  checksum_prefix = g_strndup (g_checksum_get_string (checksum), 2);
-  g_assert_cmpuint (strlen (checksum_prefix), ==, 2);
-  checksum_dir = g_build_filename (priv->objects_path, checksum_prefix, NULL);
+  object_path = get_object_path_for_checksum (self, g_checksum_get_string (checksum));
+  checksum_dir = g_path_get_dirname (object_path);
 
   if (!ht_util_ensure_directory (checksum_dir, FALSE, error))
     goto out;
   
-  object_path = g_build_filename (checksum_dir, g_checksum_get_string (checksum) + 2, NULL);
  out:
-  g_free (checksum_prefix);
   g_free (checksum_dir);
   return object_path;
 }
@@ -420,17 +468,93 @@ hacktree_repo_link_file (HacktreeRepo *self,
   return TRUE;
 }
 
-typedef struct {
-  GChecksum *checksum;
-  struct stat stbuf;
-} CommitData;
-
 static void
 commit_data_free (CommitData *data)
 {
   if (!data)
     return;
   g_checksum_free (data->checksum);
+}
+
+static void
+init_tree_builders (GVariantBuilder *files_builder,
+                    GVariantBuilder *directories_checksum_builder,
+                    GVariantBuilder *directories_data_builder)
+{
+  g_variant_builder_init (files_builder, G_VARIANT_TYPE ("a(ss)"));
+  g_variant_builder_init (directories_builder, G_VARIANT_TYPE ("as"));
+  g_variant_builder_init (directories_data_builder, G_VARIANT_TYPE ("a(suuus)"));
+}
+
+static GVariant *
+create_empty_gvariant_dict (void)
+{
+  GVariantBuilder builder;
+  g_variant_builder_init (&builder, G_VARIANT_TYPE("a{sv}"));
+  return g_variant_builder_end (&builder);
+}
+
+static gboolean
+commit_tree_from_builders (HacktreeRepo  *repo,
+                           GHashTable      *dir_to_checksum,
+                           GVariantBuilder *files_builder,
+                           GVariantBuilder *directories_checksum_builder,
+                           GVariantBuilder *directories_data_builder,
+                           GChecksum      **out_checksum,
+                           GError         **error)
+{
+  gboolean ret = FALSE;
+  GVariant *tree = NULL;
+
+  tree = g_variant_new (G_VARIANT_TYPE ("u@a{sv}@a(ss)@as@a(suuus)"),
+                        0,
+                        create_empty_gvariant_dict (),
+                        g_variant_builder_end (&files_builder),
+                        g_variant_builder_end (&dir_checksum_builder),
+                        g_variant_builder_end (&dir_data_builder));
+  g_variant_ref_sink (tree);
+  if (!import_gvariant (self, HACKTREE_SERIALIZED_TREE_VARIANT, tree, out_checksum, error))
+    goto out;
+  
+  ret = TRUE;
+ out:
+  if (tree)
+    g_variant_unref (tree);
+  return ret;
+}
+
+static gboolean
+load_gvariant_object (HacktreeRepo  *self,
+                      const char    *sha256, 
+                      GVariant     **out_variant,
+                      GError       **error)
+{
+  GMappedFile *mfile = NULL;
+  gboolean ret = FALSE;
+  char *path = NULL;
+
+  path = get_object_path_for_checksum (repo, sha256);
+  
+  mfile = g_mapped_file_new (priv->index_path, FALSE, error);
+  if (mfile == NULL)
+    goto out;
+  else
+    {
+      *out_variant = g_variant_new_from_data (HACKTREE_INDEX_GVARIANT_FORMAT,
+                                              g_mapped_file_get_contents (mfile),
+                                              g_mapped_file_get_length (mfile),
+                                              FALSE,
+                                              (GDestroyNotify) g_mapped_file_unref,
+                                              mfile);
+      mfile = NULL;
+    }
+
+  ret = TRUE;
+ out:
+  g_free (path);
+  if (mfile != NULL)
+    g_mapped_file_unref (mfile);
+  return ret;
 }
 
 gboolean
@@ -447,16 +571,26 @@ hacktree_repo_commit_files (HacktreeRepo *repo,
   int i;
   int current_tree_depth = -1;
   GPtrArray *sorted_files = NULL;
-  GHashTable *filename_to_commit_data = NULL;
+  gboolean builders_initialized = FALSE;
+  GHashTable *dir_to_checksum = NULL;
+  GVariantBuilder files_builder;
+  GVariantBuilder dir_checksum_builder;
+  GVariantBuilder dir_data_builder;
+  GVariant *commit = NULL;
 
-  filename_to_commit_data = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                                   NULL, (GDestroyNotify)commit_data_free);
+  dir_to_checksum = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   sorted_files = ht_util_sort_filenames_by_component_length (files);
+
+  builders_initialized = TRUE;
+  init_tree_builders (&files_builder,
+                      &dir_checksum_builder,
+                      &dir_data_builder);
 
   for (i = 0; i < sorted_files->len; i++)
     {
       const char *filename = files->pdata[i];
       CommitData *data = NULL;
+      struct stat stbuf;
       int n_components;
 
       if (ht_util_filename_has_dotdot (filename))
@@ -469,7 +603,7 @@ hacktree_repo_commit_files (HacktreeRepo *repo,
       if (g_path_is_absolute (filename))
         {
           g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Abolute filename '%s' not allowed (yet)", filename);
+                       "Absolute filename '%s' not allowed (yet)", filename);
           goto out;
         }
 
@@ -478,17 +612,21 @@ hacktree_repo_commit_files (HacktreeRepo *repo,
         current_tree_depth = n_components;
       else if (n_components < current_tree_depth)
         {
-          
+          if (!commit_tree_from_builders (self, dir_to_checksum,
+                                          &files_builder,
+                                          &dir_checksum_builder,
+                                          &dir_data_builder,
+                                          error))
+            goto out;
+          init_tree_builders (&files_builder,
+                              &dir_checksum_builder,
+                              &dir_data_builder);
         }
       
       g_free (abspath);
       abspath = g_build_filename (base, filename, NULL);
-      commitdata = g_new0 (CommitData, 1);
       
-      /* Takes ownership of commitdata */
-      g_hash_table_insert (filename_to_checksum, filename, commitdata);
-
-      if (lstat (abspath, &commitdata->stbuf) < 0)
+      if (lstat (abspath, &stbuf) < 0)
         {
           ht_util_set_error_from_errno (error, errno);
           goto out;
@@ -497,31 +635,71 @@ hacktree_repo_commit_files (HacktreeRepo *repo,
       if (S_ISDIR (stbuf.st_mode))
         {
           GVariant *dirdata;
+          GChecksum *tree_checksum = NULL;
 
-          dirdata = create_directory_data (abspath, error);
+          dirdata = import_directory (abspath, error);
           if (!dirdata)
             goto out;
           g_variant_ref_sink (dirdata);
           
-          if (!import_gvariant (self, dirdata, error))
+          if (!import_gvariant (self, dirdata, &tree_checksum, error))
             {
               g_variant_unref (dirdata);
               goto out;
             }
+
+          g_variant_builder_add (&dir_checksum_builder,
+                                 "s", g_checksum_get_string (tree_checksum));
+          g_checksum_free (tree_checksum);
+          tree_checksum = NULL;
+          
+          g_variant_builder_add (&dir_data_builder, dirdata); 
+
           g_variant_unref (dirdata);
         }
       else
         {
-          if (!link_one_file (self, abspath, TRUE, FALSE, error))
+          GChecksum *file_checksum = NULL;
+
+          if (!link_one_file (self, abspath, TRUE, FALSE, &file_checksum, error))
             goto out;
+          
+          g_variant_builder_add (&dir_checksum_builder,
+                                 "s", g_checksum_get_string (file_checksum));
+          g_checksum_free (file_checksum);
         }
     }
+  if (sorted_files->len > 0)
+    {
+      if (!commit_tree_from_builders (self, &files_builder,
+                                      &dir_checksum_builder,
+                                      &dir_data_builder))
+        goto out;
+      builders_initialized = FALSE;
+    }
 
+  {
+    GDateTime *now = g_date_time_new_now_utc ();
+    
+    commit = g_variant_new (G_VARIANT_TYPE("(u@a{sv}ssts)"),
+                            HACKTREE_COMMIT_VERSION,
+                            create_empty_gvariant_dict (),
+                            subject, body,
+                            g_date_time_to_unix () / G_TIME_SPAN_SECOND,
+                            
+                          
+
+  ret = TRUE;
  out:
+  g_hash_table_destroy (dir_to_checksum);
   if (sorted_files != NULL)
     g_ptr_array_free (sorted_files);
-  if (filename_to_checksum != NULL)
-    g_hash_table_destroy (filename_to_checksum);
+  if (builders_initialized)
+    {
+      g_variant_builder_clear (&files_builder);
+      g_variant_builder_clear (&dir_checksum_builder);
+      g_variant_builder_clear (&dir_data_builder);
+    }
   g_free (abspath);
   return ret;
 }

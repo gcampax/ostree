@@ -36,15 +36,18 @@ typedef enum {
 
 #define HACKTREE_SERIALIZED_VARIANT_FORMAT G_VARIANT_TYPE("(uv)")
 
+#define HACKTREE_TREE_VERSION 0
 /*
  * Tree objects:
  * u - Version
  * a{sv} - Metadata
  * a(ss) - array of (checksum, filename) for files
  * as - array of tree checksums for directories
- * a(ssuay) - array of (dirname, uid, gid, mode, xattr_checksum) for directories
+ * a(suuus) - array of (dirname, uid, gid, mode, xattr_checksum) for directories
  */
 #define HACKTREE_TREE_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}a(ss)asa(suuus)")
+
+#define HACKTREE_COMMIT_VERSION 0
 /*
  * Commit objects:
  * u - Version

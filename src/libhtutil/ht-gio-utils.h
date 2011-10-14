@@ -28,6 +28,10 @@ G_BEGIN_DECLS
 
 gboolean ht_util_ensure_directory (const char *path, gboolean with_parents, GError **error);
 
+char * ht_util_get_file_contents_utf8 (const char *path, GError    **error);
+
+GFileInputStream *ht_util_read_file_noatime (GFile *file, GCancellable *cancellable, GError **error);
+
 G_END_DECLS
 
 #endif
