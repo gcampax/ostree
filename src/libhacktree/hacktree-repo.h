@@ -59,13 +59,15 @@ gboolean      hacktree_repo_link_file (HacktreeRepo *repo,
                                        gboolean      force,
                                        GError      **error);
 
-gboolean      hacktree_repo_commit_files (HacktreeRepo *repo,
-                                          const char   *subject,
-                                          const char   *body,
-                                          GVariant     *metadata,
-                                          const char   *base,
-                                          GPtrArray    *files,
-                                          GError      **error);
+gboolean      hacktree_repo_commit (HacktreeRepo *repo,
+                                    const char   *subject,
+                                    const char   *body,
+                                    GVariant     *metadata,
+                                    const char   *base,
+                                    GPtrArray    *modified_files,
+                                    GPtrArray    *removed_files,
+                                    GChecksum   **out_commit,
+                                    GError      **error);
 
 gboolean      hacktree_repo_import_tree (HacktreeRepo *repo,
                                          GVariant     *tree_variant,

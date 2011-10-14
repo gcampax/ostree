@@ -31,40 +31,44 @@ G_BEGIN_DECLS
 typedef enum {
   HACKTREE_SERIALIZED_TREE_VARIANT = 1,
   HACKTREE_SERIALIZED_COMMIT_VARIANT = 2
-  HACKTREE_SERIALIZED_XATTRS_VARIANT = 3
+  HACKTREE_SERIALIZED_DIRMETA_VARIANT = 3
 } HacktreeSerializedVariantType;
 
 #define HACKTREE_SERIALIZED_VARIANT_FORMAT G_VARIANT_TYPE("(uv)")
+
+#define HACKTREE_DIR_META_VERSION 0
+/*
+ * dirmeta objects:
+ * u - Version
+ * u - uid
+ * u - gid
+ * u - mode
+ * ay - xattrs
+ */
+#define HACKTREE_DIRMETA_GVARIANT_FORMAT G_VARIANT_TYPE("(uuuuay)")
 
 #define HACKTREE_TREE_VERSION 0
 /*
  * Tree objects:
  * u - Version
  * a{sv} - Metadata
- * a(ss) - array of (checksum, filename) for files
- * as - array of tree checksums for directories
- * a(suuus) - array of (dirname, uid, gid, mode, xattr_checksum) for directories
+ * a(ss) - array of (filename, checksum) for files
+ * a(sss) - array of (dirname, tree_checksum, meta_checksum) for directories
  */
-#define HACKTREE_TREE_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}a(ss)asa(suuus)")
+#define HACKTREE_TREE_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}a(ss)a(sss)")
 
 #define HACKTREE_COMMIT_VERSION 0
 /*
  * Commit objects:
  * u - Version
  * a{sv} - Metadata
+ * s - parent checksum
  * s - subject 
  * s - body
  * t - Timestamp in seconds since the epoch (UTC)
  * s - Tree SHA256
  */
-#define HACKTREE_COMMIT_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}ssts)")
-
-/*
- * xattr objects:
- * u - Version
- * ay - data
- */
-#define HACKTREE_XATTR_GVARIANT_FORMAT G_VARIANT_TYPE("(uay)")
+#define HACKTREE_COMMIT_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}sssts)")
 
 gboolean   hacktree_get_xattrs_for_directory (const char *path,
                                               char      **out_xattrs,

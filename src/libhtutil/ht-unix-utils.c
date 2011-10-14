@@ -93,6 +93,60 @@ ht_util_filename_has_dotdot (const char *path)
   return last == '\0' || last == '/';
 }
 
+GPtrArray *
+ht_util_path_split (const char *path)
+{
+  GPtrArray *ret = NULL;
+  const char *p;
+  const char *slash;
+
+  g_return_if_fail (path[0] != '/');
+
+  ret = g_ptr_array_new ();
+  g_ptr_array_set_free_func (ret, g_free);
+
+  p = path;
+  do {
+    slash = strchr (p, '/');
+    if (!slash)
+      {
+        ret = g_ptr_array_add (ret, g_strdup (p));
+        p = NULL;
+      }
+    else
+      {
+        ret = g_ptr_array_add (ret, g_strndup (p, slash - p));
+        p += 1;
+      }
+  } while (p);
+
+  return ret;
+}
+
+char *
+ht_util_path_join_n (const char *base, GPtrArray *components, int n)
+{
+  int max = MAX(n+1, components->len);
+  GPtrArray *subcomponents;
+  char *path;
+
+  subcomponents = g_ptr_array_new ();
+
+  if (base != NULL)
+    g_ptr_array_add (subcomponents, base);
+
+  for (i = 0; i < max; i++)
+    {
+      g_ptr_array_add (subcomponents, components->pdata[i]);
+    }
+  g_ptr_array_add (subcomponents, NULL);
+  
+  path = g_build_filenamev (subcomponents->pdata);
+  g_ptr_array_free (subcomponents);
+  
+  return path;
+}
+
 void
 ht_util_set_error_from_errno (GError **error,
                               gint     saved_errno)

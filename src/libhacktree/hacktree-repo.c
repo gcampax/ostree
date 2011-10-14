@@ -159,7 +159,7 @@ hacktree_repo_new (const char *path)
 }
 
 static gboolean
-parse_checksum_file (HacktreeRepo   *repo,
+parse_checksum_file (HacktreeRepo   *self,
                      const char     *path,
                      char          **sha256,
                      GError        **error)
@@ -203,15 +203,15 @@ hacktree_repo_check (HacktreeRepo *self, GError **error)
   
   priv->inited = TRUE;
 
-  return parse_checksum_file (repo, priv->head_ref_path, &priv->current_head, error);
+  return parse_checksum_file (self, priv->head_ref_path, &priv->current_head, error);
 }
 
 static gboolean
-import_gvariant (HacktreeRepo  *repo,
-                 HacktreeSerializedVariantType type,
-                 GVariant       *variant,
-                 GChecksum    **out_checksum,
-                 GError       **error)
+import_gvariant_object (HacktreeRepo  *self,
+                        HacktreeSerializedVariantType type,
+                        GVariant       *variant,
+                        GChecksum    **out_checksum,
+                        GError       **error)
 {
   HacktreeRepoPrivate *priv = GET_PRIVATE (self);
   GVariantBuilder builder;
@@ -247,7 +247,7 @@ import_gvariant (HacktreeRepo  *repo,
                               NULL, error))
     goto out;
 
-  if (!link_one_file (repo, tmp_name, FALSE, FALSE, out_checksum, error))
+  if (!link_one_file (self, tmp_name, FALSE, FALSE, out_checksum, error))
     goto out;
   
   ret = TRUE;
@@ -263,17 +263,82 @@ import_gvariant (HacktreeRepo  *repo,
   return ret;
 }
 
-static GVariant *
-import_directory (HacktreeRepo  *self,
-                  const char *path,
-                  GError    **error)
+static gboolean
+load_gvariant_object (HacktreeRepo  *self,
+                      HacktreeSerializedVariantType expected_type,
+                      const char    *sha256, 
+                      GVariant     **out_variant,
+                      GError       **error)
 {
-  GVariant *ret = NULL;
+  GMappedFile *mfile = NULL;
+  gboolean ret = FALSE;
+  GVariant *ret_variant = NULL;
+  GVariant *container = NULL;
+  char *path = NULL;
+
+  path = get_object_path_for_checksum (self, sha256);
+  
+  mfile = g_mapped_file_new (priv->index_path, FALSE, error);
+  if (mfile == NULL)
+    goto out;
+  else
+    {
+      guint32 type;
+      container = g_variant_new_from_data (HACKTREE_SERIALIZED_VARIANT_FORMAT,
+                                           g_mapped_file_get_contents (mfile),
+                                           g_mapped_file_get_length (mfile),
+                                           FALSE,
+                                           (GDestroyNotify) g_mapped_file_unref,
+                                           mfile);
+      if (!g_variant_is_of_type (container, HACKTREE_SERIALIZED_VARIANT_FORMAT))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Corrupted metadata object '%s'", sha256);
+          goto out;
+        }
+      g_variant_get (container, HACKTREE_SERIALIZED_VARIANT_FORMAT,
+                     &type, &ret_variant);
+      if (type != expected_type)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Corrupted metadata object '%s'; found type %u, expected %u", sha256,
+                       type, (guint32)expected_type);
+          goto out;
+
+        }
+      mfile = NULL;
+    }
+
+  ret = TRUE;
+ out:
+  if (!ret)
+    {
+      if (!ret_variant)
+        g_variant_unref (ret_variant);
+    }
+  else
+    *out_variant = ret_variant;
+  if (container != NULL)
+    g_variant_unref (container);
+  g_free (path);
+  if (mfile != NULL)
+    g_mapped_file_unref (mfile);
+  return ret;
+}
+
+static gboolean
+import_directory_meta (HacktreeRepo  *self,
+                       const char *path,
+                       GVariant  **out_variant,
+                       GChecksum **out_checksum,
+                       GError    **error)
+{
+  gboolean ret = FALSE;
   struct stat stbuf;
   char *basename = NULL;
-  GChecksum *xattr_checksum = NULL;
+  GChecksum *ret_checksum = NULL;
   const char *xattr_checksum_string;
-  GVariant *xattr_variant = NULL;
+  GVariant *dirmeta = NULL;
   char *xattrs = NULL;
   gsize xattr_len;
 
@@ -293,32 +358,34 @@ import_directory (HacktreeRepo  *self,
   if (!hacktree_get_xattrs_for_directory (path, &xattrs, &xattr_len, error))
     goto out;
 
-  if (xattrs != NULL)
-    {
-      xattr_variant = g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
-                                                 xattrs, xattr_len, 1);
-      g_variant_ref_sink (xattr_variant);
-      if (!import_gvariant (self, HACKTREE_SERIALIZED_XATTRS_VARIANT, xattr_variant, &xattr_checksum, error))
+  dirmeta = g_variant_new (G_VARIANT_TYPE ("(uuuu@ay)"),
+                           HACKTREE_DIR_META_VERSION,
+                           (guint32)stbuf.st_uid,
+                           (guint32)stbuf.st_gid,
+                           (guint32)(stbuf.st_mode & ~S_IFMT),
+                           g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
+                                                      xattrs, xattr_len, 1));
+  g_variant_ref_sink (dirmeta);
+
+  if (!import_gvariant_object (self, HACKTREE_SERIALIZED_DIRMETA_VARIANT, 
+                               dirmeta, &ret_checksum, error))
         goto out;
-      xattr_checksum_string = g_checksum_get_string (xattr_checksum);
+
+  ret = TRUE;
+ out:
+  if (!ret)
+    {
+      if (ret_checksum)
+        g_checksum_free (ret_checksum);
+      if (dirmeta != NULL)
+        g_variant_unref (dirmeta);
     }
   else
-    xattr_checksum_string = HACKTREE_EMPTY_STRING_SHA256;
- 
-  basename = g_path_get_basename (path);
-
-  ret = g_variant_new (G_VARIANT_TYPE ("(suuus)"),
-                       basename,
-                       (guint32)stbuf.st_uid,
-                       (guint32)stbuf.st_gid,
-                       (guint32)(stbuf.st_mode & ~S_IFMT),
-                       xattr_checksum_string);
-
- out:
-  if (xattr_checksum != NULL)
-    g_checksum_free (xattr_checksum);
+    {
+      *out_checksum = ret_checksum;
+      *out_variant = dirmeta;
+    }
   g_free (xattrs);
-  g_free (basename);
   return ret;
 }
 
@@ -468,22 +535,184 @@ hacktree_repo_link_file (HacktreeRepo *self,
   return TRUE;
 }
 
+typedef struct _ParsedTreeData ParsedTreeData;
+typedef struct _ParsedDirectoryData ParsedDirectoryData;
+
+struct _ParsedDirectoryData {
+  ParsedTreeData *tree_data;
+  char *metadata_sha256;
+  GVariant *meta_data;
+};
+
 static void
-commit_data_free (CommitData *data)
+parsed_directory_data_free (ParsedDirectoryData *pdata)
 {
-  if (!data)
+  if (pdata == NULL)
     return;
-  g_checksum_free (data->checksum);
+  g_variant_unref (pdata->tree_data);
+  g_free (pdata->metadata_sha256);
+  g_variant_unref (pdata->meta_data);
+  g_free (pdata);
+}
+
+struct _ParsedTreeData {
+  GHashTable *files;  /* char* filename -> char* checksum */
+  GHashTable *directories;  /* char* dirname -> ParsedDirectoryData* */
+};
+
+static ParsedTreeData *
+parsed_tree_data_new (void)
+{
+  ParsedTreeData *ret = g_new0 (ParsedTreeData, 1);
+  ret->files = g_hash_table_new (g_str_hash, g_str_equal,
+                                 (GDestroyNotify)g_free, 
+                                 (GDestroyNotify)g_free);
+  ret->directories = g_hash_table_new (g_str_hash, g_str_equal,
+                                       (GDestroyNotify)g_free, 
+                                       (GDestroyNotify)parsed_directory_data_free);
+}
+
+static void
+parsed_tree_data_free (ParsedTreeData *pdata)
+{
+  if (pdata == NULL)
+    return;
+  g_hash_table_destroy (pdata->files);
+  g_hash_table_destroy (pdata->directories);
+  g_free (pdata);
+}
+
+static gboolean
+parse_tree (HacktreeRepo    *self,
+            const char      *sha256,
+            ParsedTreeData **out_pdata,
+            GError         **error)
+{
+  HacktreeRepoPrivate *priv = GET_PRIVATE (self);
+  gboolean ret = FALSE;
+  ParsedTreeData *ret_pdata = NULL;
+  int i, n;
+  guint32 version;
+  GVariant *tree_variant = NULL;
+  GVariant *meta_variant = NULL;
+  GVariant *files_variant = NULL;
+  GVariant *dirs_variant = NULL;
+
+  if (!load_gvariant_object (self, HACKTREE_SERIALIZED_TREE_VARIANT,
+                             sha256, &tree_variant, error))
+    goto out;
+
+  g_variant_get (tree_variant, "(u@a{sv}@a(ss)@a(sss))",
+                 &version, &meta_variant, &files_variant, &dirs_variant);
+
+  ret_pdata = parsed_tree_data_new ();
+  n = g_variant_n_children (files_variant);
+  for (i = 0; i < n; i++)
+    {
+      const char *filename;
+      const char *checksum;
+
+      g_variant_get_child_value (files_variant, i, "(ss)", &filename, &checksum);
+
+      g_hash_table_insert (ret_pdata, g_strdup (filename), g_strdup (checksum));
+    }
+
+  n = g_variant_n_children (dirs_variant);
+  for (i = 0; i < n; i++)
+    {
+      const char *dirname;
+      const char *tree_checksum;
+      const char *meta_checksum;
+      ParsedTreeData *child_tree = NULL;
+      GVariant *metadata = NULL;
+      ParsedDirectoryData *child_dir = NULL;
+
+      g_variant_get_child_value (files_variant, i, "(sss)",
+                                 &filename, &tree_checksum, &meta_checksum);
+
+      if (!parse_tree (self, tree_checksum, &child_tree, error))
+        goto out;
+
+      if (!load_gvariant_object (self, HACKTREE_SERIALIZED_DIRMETA_VARIANT,
+                                 meta_checksum, &metadata, error))
+        {
+          parsed_tree_data_free (child_tree);
+          goto out;
+        }
+
+      child_dir = g_new0 (ParsedDirectoryData, 1);
+      child_dir->tree_data = child_tree;
+      child_dir->metadata_sha256 = g_strdup (meta_checksum);
+      child_dir->meta_data = g_variant_ref_sink (metadata);
+
+      g_hash_table_insert (ret_pdata->directories, g_strdup (dirname), child_dir);
+    }
+
+  ret = TRUE;
+ out:
+  if (!ret)
+    parsed_tree_data_free (ret_pdata);
+  else
+    *out_pdata = ret_pdata;
+  if (tree_variant)
+    g_variant_unref (tree_variant);
+  if (meta_variant)
+    g_variant_unref (meta_variant);
+  if (files_variant)
+    g_variant_unref (files_variant);
+  if (dirs_variant)
+    g_variant_unref (dirs_variant);
+  return ret;
+}
+
+static gboolean
+load_commit_and_trees (HacktreeRepo   *self,
+                       const char     *commit_sha256,
+                       GVariant      **out_commit,
+                       ParsedTreeData **out_tree_data, 
+                       GError        **error)
+{
+  HacktreeRepoPrivate *priv = GET_PRIVATE (self);
+  GVariant *ret_commit = NULL;
+  ParsedTreeData *ret_tree_data = NULL;
+  gboolean ret = FALSE;
+  const char *tree_checksum;
+
+  if (!priv->current_head)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Can't load current commit; no HEAD reference");
+      goto out;
+    }
+
+  if (!load_gvariant_object (self, commit_sha256, &ret_commit, error))
+    goto out;
+
+  g_variant_get_child (ret_commit, 5, "&s", &tree_checksum);
+
+  if (!parse_tree (self, tree_checksum, &ret_tree_data, error))
+    goto out;
+
+  ret = TRUE;
+ out:
+  if (!ret)
+    {
+      if (ret_commit)
+        g_variant_unref (ret_commit);
+      parsed_tree_data_free (ret_tree_data);
+    }
+  else
+    {
+      *out_commit = ret_commit;
+      *out_tree_data = ret_tree_data;
+    }
+  return FALSE;
 }
 
 static void
 init_tree_builders (GVariantBuilder *files_builder,
-                    GVariantBuilder *directories_checksum_builder,
-                    GVariantBuilder *directories_data_builder)
+                    GVariantBuilder *directories_builder)
 {
-  g_variant_builder_init (files_builder, G_VARIANT_TYPE ("a(ss)"));
-  g_variant_builder_init (directories_builder, G_VARIANT_TYPE ("as"));
-  g_variant_builder_init (directories_data_builder, G_VARIANT_TYPE ("a(suuus)"));
 }
 
 static GVariant *
@@ -495,211 +724,459 @@ create_empty_gvariant_dict (void)
 }
 
 static gboolean
-commit_tree_from_builders (HacktreeRepo  *repo,
-                           GHashTable      *dir_to_checksum,
-                           GVariantBuilder *files_builder,
-                           GVariantBuilder *directories_checksum_builder,
-                           GVariantBuilder *directories_data_builder,
-                           GChecksum      **out_checksum,
-                           GError         **error)
+import_parsed_tree (HacktreeRepo    *self,
+                    ParsedTreeData  *tree,
+                    GChecksum      **out_checksum,
+                    GError         **error)
 {
   gboolean ret = FALSE;
   GVariant *tree = NULL;
+  gboolean builders_initialized = FALSE;
+  GVariantBuilder files_builder;
+  GVariantBuilder dirs_builder;
+  GHashTableIter hash_iter;
+  gpointer key, value;
 
-  tree = g_variant_new (G_VARIANT_TYPE ("u@a{sv}@a(ss)@as@a(suuus)"),
+  g_variant_builder_init (&files_builder, G_VARIANT_TYPE ("a(ss)"));
+  g_variant_builder_init (&dirs_builder, G_VARIANT_TYPE ("a(sss)"));
+  builders_initialized = TRUE;
+
+  hash_iter = g_hash_table_iter_init (&hash_iter, tree->files);
+  while (g_hash_table_iter_next (&hash_iter, &key, &value))
+    {
+      const char *name = key;
+      const char *checksum = value;
+
+      g_variant_builder_add (&files_builder, "(ss)", name, checksum);
+    }
+
+  hash_iter = g_hash_table_iter_init (&hash_iter, tree->directories);
+  while (g_hash_table_iter_next (&hash_iter, &key, &value))
+    {
+      const char *name = key;
+      GChecksum *dir_checksum = NULL;
+      ParsedDirectoryData *dir = value;
+
+      if (!import_parsed_tree (self, dir->tree_data, &dir_checksum, error))
+        goto out;
+
+      g_variant_builder_add (&dirs_builder, "(sss)",
+                             name, g_checksum_get_string (dir_checksum), dir->metadata_sha256);
+    }
+
+  tree = g_variant_new (G_VARIANT_TYPE ("u@a{sv}@a(ss)@a(sss)"),
                         0,
                         create_empty_gvariant_dict (),
                         g_variant_builder_end (&files_builder),
-                        g_variant_builder_end (&dir_checksum_builder),
-                        g_variant_builder_end (&dir_data_builder));
+                        g_variant_builder_end (&dirs_builder));
+  builders_initialized = FALSE;
   g_variant_ref_sink (tree);
-  if (!import_gvariant (self, HACKTREE_SERIALIZED_TREE_VARIANT, tree, out_checksum, error))
+  if (!import_gvariant_object (self, HACKTREE_SERIALIZED_TREE_VARIANT, tree, out_checksum, error))
     goto out;
   
   ret = TRUE;
  out:
+  if (builders_initialized)
+    {
+      g_variant_builder_clear (&files_builder);
+      g_variant_builder_clear (&dirs_builder);
+    }
   if (tree)
     g_variant_unref (tree);
   return ret;
 }
 
 static gboolean
-load_gvariant_object (HacktreeRepo  *self,
-                      const char    *sha256, 
-                      GVariant     **out_variant,
-                      GError       **error)
+check_path (const char *filename,
+            GError    **error)
 {
-  GMappedFile *mfile = NULL;
   gboolean ret = FALSE;
-  char *path = NULL;
 
-  path = get_object_path_for_checksum (repo, sha256);
-  
-  mfile = g_mapped_file_new (priv->index_path, FALSE, error);
-  if (mfile == NULL)
-    goto out;
-  else
+  if (!*filename)
     {
-      *out_variant = g_variant_new_from_data (HACKTREE_INDEX_GVARIANT_FORMAT,
-                                              g_mapped_file_get_contents (mfile),
-                                              g_mapped_file_get_length (mfile),
-                                              FALSE,
-                                              (GDestroyNotify) g_mapped_file_unref,
-                                              mfile);
-      mfile = NULL;
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid empty filename");
+      goto out;
+    }
+
+  if (ht_util_filename_has_dotdot (filename))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Path uplink '..' in filename '%s' not allowed (yet)", filename);
+      goto out;
+    }
+  
+  if (g_path_is_absolute (filename))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Absolute filename '%s' not allowed (yet)", filename);
+      goto out;
     }
 
   ret = TRUE;
  out:
-  g_free (path);
-  if (mfile != NULL)
-    g_mapped_file_unref (mfile);
+  return ret;
+}
+
+static gboolean
+walk_parsed_tree (HacktreeRepo  *self,
+                  const char    *filename,
+                  ParsedTreeData *tree,
+                  int            *out_filename_index, /* out*/
+                  char          **out_component, /* out, but do not free */
+                  ParsedTreeData **out_tree, /* out, but do not free */
+                  GError        **error)
+{
+  gboolean ret = FALSE;
+  GPtrArray *components = NULL;
+  GSList *iter;
+  ParsedTreeData *current_tree = tree;
+  const char *component = NULL;
+  const char *file_sha1;
+  ParsedDirectorData *dir;
+  int i;
+  int ret_filename_index = 0;
+
+  components = ht_util_path_split (filename);
+  g_assert (components != NULL);
+
+  current_tree = tree;
+  for (i = 0; i < components->len - 1; i++)
+    {
+      component = components->pdata[i];
+      file_sha1 = g_hash_table_lookup (current_tree->files, component);
+      dir = g_hash_table_lookup (current_tree->directories, component);
+          
+      if (!(file_sha1 || dir))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "No such file or directory: %s",
+                       filename);
+          goto out;
+        }
+      else if (file_sha1)
+        break;
+      else if (!dir)
+        g_assert_not_reached ();
+      current_tree = dir;
+      ret_filename_index++;
+    }
+
+  if (file_sha1 && iter->next)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Encountered non-directory '%s' in '%s'",
+                   iter->data,
+                   filename);
+      goto out;
+    }
+
+  ret = TRUE;
+  g_assert (!(file_sha1 && dir));
+  *out_filename_index = i;
+  *out_filename = component;
+  *out_tree = current_tree;
+ out:
+  g_ptr_array_free (components);
+  return ret;
+}
+
+static gboolean
+remove_files_from_tree (HacktreeRepo   *self,
+                        const char     *base,
+                        GPtrArray      *removed_files,
+                        ParsedTreeData *tree,
+                        GError        **error)
+{
+  gboolean ret = FALSE;
+  int i;
+
+  for (i = 0; i < removed_files->len; i++)
+    {
+      const char *filename = removed_files->pdata[i];
+      int filename_index;
+      const char *component;
+      ParsedTreeData *parent;
+      const char *file_sha1;
+      ParsedTreeData *dir;
+
+      if (!check_path (filename, error))
+        goto out;
+       
+      if (!walk_parsed_tree (self, filename, &filename_index, (char*)&component, &parent, error))
+        goto out;
+
+      file_sha1 = g_hash_table_lookup (parent->files, component);
+      dir = g_hash_table_lookup (parent->directories, component);
+
+      if (file_sha1)
+        g_hash_table_remove (parent->files, component);
+      else if (dir)
+        g_hash_table_remove (parent->directories, component);
+      else
+        g_assert_not_reached ();
+    }
+  
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+add_one_directory_to_tree_and_import (HacktreeRepo   *self,
+                                      const char     *basename,
+                                      const char     *abspath,
+                                      ParsedTreeData *tree,
+                                      ParsedDirectoryData *dir,
+                                      GError        **error)
+{
+  gboolean ret = FALSE;
+  GVariant *dirmeta = NULL;
+  GChecksum *dir_meta_checksum = NULL;
+
+  g_assert (tree != NULL);
+
+  if (!import_directory_meta (self, abspath, &dirmeta, &dir_meta_checksum, error))
+    goto out;
+
+  if (dir)
+    {
+      g_variant_unref (dir->metadata);
+      dir->metadata = dirmeta;
+    }
+  else
+    {
+      dir = g_new0 (ParsedDirectoryData, 1);
+      dir->tree_data = parsed_tree_data_new ();
+      dir->metadata_sha256 = g_strdup (g_checksum_get_string (dir_meta_checksum));
+      dir->metadata = dirmeta;
+      g_hash_table_insert (tree->directories, g_strdup (basename), dir);
+    }
+
+  ret = TRUE;
+ out:
+  if (dir_meta_checksum)
+    g_checksum_free (dir_meta_checksum);
+  return ret;
+}
+
+static gboolean
+add_one_file_to_tree_and_import (HacktreeRepo   *self,
+                                 const char     *basename,
+                                 const char     *abspath,
+                                 ParsedTreeData *tree,
+                                 GError        **error)
+{
+  gboolean ret = FALSE;
+  GChecksum *checksum = NULL;
+  
+  g_assert (tree != NULL);
+
+  if (!link_one_file (self, abspath, FALSE, FALSE, &checksum, error))
+    goto out;
+
+  g_hash_table_replace (tree->files, g_strdup (basename),
+                        g_strdup (g_checksum_get_string (checksum)));
+
+  ret = TRUE;
+ out:
+  if (checksum)
+    g_checksum_free (checksum);
+  return ret;
+}
+
+static gboolean
+add_one_path_to_tree_and_import (HacktreeRepo   *self,
+                                 const char     *base,
+                                 const char     *filename,
+                                 ParsedTreeData *tree,
+                                 GError        **error)
+{
+  gboolean ret = FALSE;
+  GPtrArray *components = NULL;
+  struct stat stbuf;
+  GSList *iter;
+  char *component_abspath = NULL;
+  ParsedTreeData *current_tree = tree;
+  const char *component = NULL;
+  const char *file_sha1;
+  ParsedDirectoryData *dir;
+  int i;
+  gboolean is_directory;
+      
+  if (!check_path (filename, error))
+    goto out;
+
+  abspath = g_build_filename (base, filename, NULL);
+
+  if (!lstat (abspath, &stbuf))
+    {
+      ht_util_set_error_from_errno (error, errno);
+      goto out;
+    }
+  is_directory = S_ISDIR(stbuf.st_mode);
+       
+  if (components)
+    g_ptr_array_free (components);
+  components = ht_util_path_split (filename);
+  g_assert (components->len > 0);
+
+  current_tree = tree;
+  for (i = 0; i < components->len; i++)
+    {
+      component = components->pdata[i];
+      g_free (component_abspath);
+      component_abspath = ht_util_path_join_n (base, components, i);
+      file_sha1 = g_hash_table_lookup (current_tree->files, component);
+      dir = g_hash_table_lookup (current_tree->directories, component);
+          
+      if (i < components->len - 1)
+        {
+          if (file_sha1 != NULL)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Encountered non-directory '%s' in '%s'",
+                           component,
+                           filename);
+              goto out;
+            }
+          /* Implicitly add intermediate directories */
+          if (!add_one_directory_to_tree_and_import (self, component, abspath, current_tree, dir, &error))
+            goto out;
+        }
+      else if (is_directory)
+        {
+          if (file_sha1 != NULL)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "File '%s' can't be overwritten by directory",
+                           filename);
+              goto out;
+            }
+          if (!add_one_directory_to_tree_and_import (self, component, abspath, current_tree, dir, &error))
+            goto out;
+        }
+      else 
+        {
+          g_assert (!is_directory);
+          if (dir != NULL)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "File '%s' can't be overwritten by directory",
+                           filename);
+              goto out;
+            }
+          if (!add_one_file_to_tree_and_import (self, component, abspath, current_tree, &error))
+            goto out;
+        }
+    }
+
+  ret = TRUE;
+ out:
+  g_free (component_abspath);
+  g_free (abspath);
+  return ret;
+}
+
+
+static gboolean
+add_files_to_tree_and_import (HacktreeRepo   *self,
+                              const char     *base,
+                              GPtrArray      *added_files,
+                              ParsedTreeData *tree,
+                              GError        **error)
+{
+  gboolean ret = FALSE;
+  int i;
+
+  for (i = 0; i < added_files->len; i++)
+    {
+      const char *path = added_files->pdata[i];
+
+      if (!add_one_path_to_tree_and_import (self, base, path, tree, error))
+        goto out;
+    }
+  
+  ret = TRUE;
+ out:
   return ret;
 }
 
 gboolean
-hacktree_repo_commit_files (HacktreeRepo *repo,
-                            const char   *subject,
-                            const char   *body,
-                            GVariant     *metadata,
-                            const char   *base,
-                            GPtrArray    *files,
-                            GError      **error)
+hacktree_repo_commit (HacktreeRepo *self,
+                      const char   *subject,
+                      const char   *body,
+                      GVariant     *metadata,
+                      const char   *base,
+                      GPtrArray    *modified_files,
+                      GPtrArray    *removed_files,
+                      GChecksum   **out_commit,
+                      GError      **error)
 {
-  char *abspath = NULL;
+  HacktreeRepoPrivate *priv = GET_PRIVATE (self);
   gboolean ret = FALSE;
-  int i;
-  int current_tree_depth = -1;
-  GPtrArray *sorted_files = NULL;
-  gboolean builders_initialized = FALSE;
-  GHashTable *dir_to_checksum = NULL;
-  GVariantBuilder files_builder;
-  GVariantBuilder dir_checksum_builder;
-  GVariantBuilder dir_data_builder;
+  ParsedTreeData *tree = NULL;
+  GVariant *previous_commit = NULL;
   GVariant *commit = NULL;
+  GVariant *new_tree = NULL;
+  GChecksum *root_checksum = NULL;
+  GChecksum *ret_commit_checksum = NULL;
+  GDateTime *now = NULL;
 
-  dir_to_checksum = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
-  sorted_files = ht_util_sort_filenames_by_component_length (files);
+  g_return_val_if_fail (priv->inited, FALSE);
 
-  builders_initialized = TRUE;
-  init_tree_builders (&files_builder,
-                      &dir_checksum_builder,
-                      &dir_data_builder);
-
-  for (i = 0; i < sorted_files->len; i++)
+  if (priv->current_head)
     {
-      const char *filename = files->pdata[i];
-      CommitData *data = NULL;
-      struct stat stbuf;
-      int n_components;
-
-      if (ht_util_filename_has_dotdot (filename))
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Path uplink '..' in filename '%s' not allowed (yet)", filename);
-          goto out;
-        }
-      
-      if (g_path_is_absolute (filename))
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Absolute filename '%s' not allowed (yet)", filename);
-          goto out;
-        }
-
-      n_components = ht_util_count_filename_components (filename);
-      if (current_tree_depth == -1)
-        current_tree_depth = n_components;
-      else if (n_components < current_tree_depth)
-        {
-          if (!commit_tree_from_builders (self, dir_to_checksum,
-                                          &files_builder,
-                                          &dir_checksum_builder,
-                                          &dir_data_builder,
-                                          error))
-            goto out;
-          init_tree_builders (&files_builder,
-                              &dir_checksum_builder,
-                              &dir_data_builder);
-        }
-      
-      g_free (abspath);
-      abspath = g_build_filename (base, filename, NULL);
-      
-      if (lstat (abspath, &stbuf) < 0)
-        {
-          ht_util_set_error_from_errno (error, errno);
-          goto out;
-        }
-      
-      if (S_ISDIR (stbuf.st_mode))
-        {
-          GVariant *dirdata;
-          GChecksum *tree_checksum = NULL;
-
-          dirdata = import_directory (abspath, error);
-          if (!dirdata)
-            goto out;
-          g_variant_ref_sink (dirdata);
-          
-          if (!import_gvariant (self, dirdata, &tree_checksum, error))
-            {
-              g_variant_unref (dirdata);
-              goto out;
-            }
-
-          g_variant_builder_add (&dir_checksum_builder,
-                                 "s", g_checksum_get_string (tree_checksum));
-          g_checksum_free (tree_checksum);
-          tree_checksum = NULL;
-          
-          g_variant_builder_add (&dir_data_builder, dirdata); 
-
-          g_variant_unref (dirdata);
-        }
-      else
-        {
-          GChecksum *file_checksum = NULL;
-
-          if (!link_one_file (self, abspath, TRUE, FALSE, &file_checksum, error))
-            goto out;
-          
-          g_variant_builder_add (&dir_checksum_builder,
-                                 "s", g_checksum_get_string (file_checksum));
-          g_checksum_free (file_checksum);
-        }
-    }
-  if (sorted_files->len > 0)
-    {
-      if (!commit_tree_from_builders (self, &files_builder,
-                                      &dir_checksum_builder,
-                                      &dir_data_builder))
+      if (!load_commit_and_trees (self, priv->current_head, &previous_commit, &tree, error))
         goto out;
-      builders_initialized = FALSE;
+    }
+  else
+    {
+      /* Initial commit */
+      tree = parsed_tree_data_new ();
     }
 
-  {
-    GDateTime *now = g_date_time_new_now_utc ();
-    
-    commit = g_variant_new (G_VARIANT_TYPE("(u@a{sv}ssts)"),
-                            HACKTREE_COMMIT_VERSION,
-                            create_empty_gvariant_dict (),
-                            subject, body,
-                            g_date_time_to_unix () / G_TIME_SPAN_SECOND,
-                            
-                          
+  if (!remove_files_from_tree (self, removed_files, tree, error))
+    goto out;
+
+  if (!add_files_to_tree_and_import (self, modified_files, tree, error))
+    goto out;
+  
+  if (!import_parsed_tree (self, tree, &root_checksum, error))
+    goto out;
+
+  now = g_date_time_new_now_utc ();
+  commit = g_variant_new (G_VARIANT_TYPE("(u@a{sv}sssts)"),
+                          HACKTREE_COMMIT_VERSION,
+                          create_empty_gvariant_dict (),
+                          priv->current_head ? priv->current_head : "";
+                          subject, body,
+                          g_date_time_to_unix () / G_TIME_SPAN_SECOND,
+                          g_checksum_get_string (root_checksum));
+  if (!import_gvariant_object (self, HACKTREE_SERIALIZED_COMMIT_VARIANT,
+                               commit, &commit_checksum, error))
+    goto out;
 
   ret = TRUE;
  out:
-  g_hash_table_destroy (dir_to_checksum);
-  if (sorted_files != NULL)
-    g_ptr_array_free (sorted_files);
-  if (builders_initialized)
+  if (!ret)
     {
-      g_variant_builder_clear (&files_builder);
-      g_variant_builder_clear (&dir_checksum_builder);
-      g_variant_builder_clear (&dir_data_builder);
+      if (ret_commit_checksum)
+        g_checksum_free (ret_commit_checksum);
     }
+  else
+    {
+      *out_commit = ret_commit_checksum;
+    }
+  if (root_checksum)
+    g_checksum_free (root_checksum);
+  if (previous_commit)
+    g_variant_unref (previous_commit);
+  parsed_tree_data_free (tree);
+  if (commit)
+    g_variant_unref (commit);
+  if (now)
+    g_date_time_unref (now);
   g_free (abspath);
   return ret;
 }
@@ -732,7 +1209,7 @@ hacktree_repo_import_commit (HacktreeRepo *self,
 }
 
 static gboolean
-iter_object_dir (HacktreeRepo   *repo,
+iter_object_dir (HacktreeRepo   *self,
                  GFile          *dir,
                  HacktreeRepoObjectIter  callback,
                  gpointer                user_data,
@@ -764,7 +1241,7 @@ iter_object_dir (HacktreeRepo   *repo,
       if (strlen (name) == 62 && type != G_FILE_TYPE_DIRECTORY)
         {
           char *path = g_build_filename (dirpath, name, NULL);
-          callback (repo, path, file_info, user_data);
+          callback (self, path, file_info, user_data);
           g_free (path);
         }
 
