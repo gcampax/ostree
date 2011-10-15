@@ -23,10 +23,11 @@
 
 #include <glib-unix.h>
 #include <gio/gio.h>
+#include <gio/gunixinputstream.h>
 
 #include <string.h>
 
-#include "ht-gio-utils.h"
+#include "htutil.h"
 
 gboolean
 ht_util_ensure_directory (const char *path, gboolean with_parents, GError **error)
@@ -79,10 +80,10 @@ ht_util_get_file_contents_utf8 (const char *path,
   return contents;
 }
 
-GFileInputStream *
+GInputStream *
 ht_util_read_file_noatime (GFile *file, GCancellable *cancellable, GError **error)
 {
-  GFileInputStream *ret = NULL;
+  GInputStream *ret = NULL;
   int fd;
   int flags = O_RDONLY;
   char *path = NULL;
@@ -98,7 +99,7 @@ ht_util_read_file_noatime (GFile *file, GCancellable *cancellable, GError **erro
       goto out;
     }
 
-  ret = g_unix_input_stream_new (fd, TRUE);
+  ret = (GInputStream*)g_unix_input_stream_new (fd, TRUE);
   
  out:
   g_free (path);

@@ -69,14 +69,6 @@ gboolean      hacktree_repo_commit (HacktreeRepo *repo,
                                     GChecksum   **out_commit,
                                     GError      **error);
 
-gboolean      hacktree_repo_import_tree (HacktreeRepo *repo,
-                                         GVariant     *tree_variant,
-                                         GError      **error);
-
-gboolean      hacktree_repo_import_commit (HacktreeRepo *repo,
-                                           GVariant     *commit_variant,
-                                           GError      **error);
-
 typedef void (*HacktreeRepoObjectIter) (HacktreeRepo *repo, const char *path,
                                         GFileInfo *fileinfo, gpointer user_data);
 

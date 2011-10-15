@@ -30,11 +30,11 @@ G_BEGIN_DECLS
 
 typedef enum {
   HACKTREE_SERIALIZED_TREE_VARIANT = 1,
-  HACKTREE_SERIALIZED_COMMIT_VARIANT = 2
+  HACKTREE_SERIALIZED_COMMIT_VARIANT = 2,
   HACKTREE_SERIALIZED_DIRMETA_VARIANT = 3
 } HacktreeSerializedVariantType;
 
-#define HACKTREE_SERIALIZED_VARIANT_FORMAT G_VARIANT_TYPE("(uv)")
+#define HACKTREE_SERIALIZED_VARIANT_FORMAT "(uv)"
 
 #define HACKTREE_DIR_META_VERSION 0
 /*
@@ -45,7 +45,7 @@ typedef enum {
  * u - mode
  * ay - xattrs
  */
-#define HACKTREE_DIRMETA_GVARIANT_FORMAT G_VARIANT_TYPE("(uuuuay)")
+#define HACKTREE_DIRMETA_GVARIANT_FORMAT "(uuuuay)"
 
 #define HACKTREE_TREE_VERSION 0
 /*
@@ -55,7 +55,7 @@ typedef enum {
  * a(ss) - array of (filename, checksum) for files
  * a(sss) - array of (dirname, tree_checksum, meta_checksum) for directories
  */
-#define HACKTREE_TREE_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}a(ss)a(sss)")
+#define HACKTREE_TREE_GVARIANT_FORMAT "(ua{sv}a(ss)a(sss)"
 
 #define HACKTREE_COMMIT_VERSION 0
 /*
@@ -68,7 +68,7 @@ typedef enum {
  * t - Timestamp in seconds since the epoch (UTC)
  * s - Tree SHA256
  */
-#define HACKTREE_COMMIT_GVARIANT_FORMAT G_VARIANT_TYPE("(ua{sv}sssts)")
+#define HACKTREE_COMMIT_GVARIANT_FORMAT "(ua{sv}sssts)"
 
 gboolean   hacktree_get_xattrs_for_directory (const char *path,
                                               char      **out_xattrs,

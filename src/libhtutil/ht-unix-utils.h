@@ -31,6 +31,8 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <string.h>
+#include <fcntl.h>
+#include <stdio.h>
 
 G_BEGIN_DECLS
 

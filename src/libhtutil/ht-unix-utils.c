@@ -66,7 +66,6 @@ int
 ht_util_count_filename_components (const char *path)
 {
   int i = 0;
-  char *p;
 
   while (path)
     {
@@ -100,7 +99,7 @@ ht_util_path_split (const char *path)
   const char *p;
   const char *slash;
 
-  g_return_if_fail (path[0] != '/');
+  g_return_val_if_fail (path[0] != '/', NULL);
 
   ret = g_ptr_array_new ();
   g_ptr_array_set_free_func (ret, g_free);
@@ -110,12 +109,12 @@ ht_util_path_split (const char *path)
     slash = strchr (p, '/');
     if (!slash)
       {
-        ret = g_ptr_array_add (ret, g_strdup (p));
+        g_ptr_array_add (ret, g_strdup (p));
         p = NULL;
       }
     else
       {
-        ret = g_ptr_array_add (ret, g_strndup (p, slash - p));
+        g_ptr_array_add (ret, g_strndup (p, slash - p));
         p += 1;
       }
   } while (p);
@@ -129,11 +128,12 @@ ht_util_path_join_n (const char *base, GPtrArray *components, int n)
   int max = MAX(n+1, components->len);
   GPtrArray *subcomponents;
   char *path;
+  int i;
 
   subcomponents = g_ptr_array_new ();
 
   if (base != NULL)
-    g_ptr_array_add (subcomponents, base);
+    g_ptr_array_add (subcomponents, (char*)base);
 
   for (i = 0; i < max; i++)
     {
@@ -141,8 +141,8 @@ ht_util_path_join_n (const char *base, GPtrArray *components, int n)
     }
   g_ptr_array_add (subcomponents, NULL);
   
-  path = g_build_filenamev (subcomponents->pdata);
-  g_ptr_array_free (subcomponents);
+  path = g_build_filenamev ((char**)subcomponents->pdata);
+  g_ptr_array_free (subcomponents, TRUE);
   
   return path;
 }

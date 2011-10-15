@@ -19,8 +19,8 @@
  * Author: Colin Walters <walters@verbum.org>
  */
 
-#ifndef __HACKTREE_UNIX_UTILS_H__
-#define __HACKTREE_UNIX_UTILS_H__
+#ifndef __HACKTREE_GIO_UTILS_H__
+#define __HACKTREE_GIO_UTILS_H__
 
 #include <gio/gio.h>
 
@@ -30,7 +30,7 @@ gboolean ht_util_ensure_directory (const char *path, gboolean with_parents, GErr
 
 char * ht_util_get_file_contents_utf8 (const char *path, GError    **error);
 
-GFileInputStream *ht_util_read_file_noatime (GFile *file, GCancellable *cancellable, GError **error);
+GInputStream *ht_util_read_file_noatime (GFile *file, GCancellable *cancellable, GError **error);
 
 G_END_DECLS
 
