@@ -39,6 +39,7 @@ typedef enum {
   OSTREE_SERIALIZED_DIRMETA_VARIANT = 3,
   OSTREE_SERIALIZED_XATTR_VARIANT = 4
 } OstreeSerializedVariantType;
+#define OSTREE_SERIALIZED_VARIANT_LAST 4
 
 #define OSTREE_SERIALIZED_VARIANT_FORMAT "(uv)"
 
@@ -83,13 +84,24 @@ typedef enum {
  */
 #define OSTREE_COMMIT_GVARIANT_FORMAT "(ua{sv}ssstss)"
 
-GVariant *ostree_get_xattrs_for_path (const char *path,
-                                        GError    **error);
+gboolean ostree_validate_checksum_string (const char *sha256,
+                                          GError    **error);
+
+char *ostree_get_relative_object_path (const char *checksum,
+                                       OstreeObjectType type);
+
+GVariant *ostree_get_xattrs_for_path (const char   *path,
+                                      GError     **error);
+
+gboolean ostree_parse_metadata_file (const char                  *path,
+                                     OstreeSerializedVariantType *out_type,
+                                     GVariant                   **out_variant,
+                                     GError                     **error);
 
 gboolean ostree_stat_and_checksum_file (int dirfd, const char *path,
-                                          GChecksum **out_checksum,
-                                          struct stat *out_stbuf,
-                                          GError **error);
+                                        GChecksum **out_checksum,
+                                        struct stat *out_stbuf,
+                                        GError **error);
 
 
 #endif /* _OSTREE_REPO */

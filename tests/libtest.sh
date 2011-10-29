@@ -18,6 +18,9 @@
 #
 # Author: Colin Walters <walters@verbum.org>
 
+cd `dirname $0`
+SRCDIR=`pwd`
+cd -
 TMPDIR=${TMPDIR:-/tmp}
 export TMPDIR
 test_tmpdir=`mktemp -d "$TMPDIR/ostree-tests.XXXXXXXXXX"`
@@ -89,6 +92,30 @@ setup_test_repository2 () {
     ostree commit $ot_repo -b test2 -s "Test Commit 1" -m "Commit body first" --add=firstfile
     ostree commit $ot_repo -b test2 -s "Test Commit 2" -m "Commit body second" --add=baz/cow  --add=baz/saucer --add=baz/deeper/ohyeah --add=baz/another/y
     ostree fsck -q $ot_repo
+}
+
+setup_fake_remote_repo1() {
+    oldpwd=`pwd`
+    mkdir remote
+    ostree init --repo=remote
+    mkdir remote-files
+    cd remote-files 
+    echo first > firstfile
+    mkdir baz
+    echo moo > baz/cow
+    echo alien > baz/saucer
+    find | grep -v '^\.$' | ostree commit --repo=${test_tmpdir}/remote -b main -s "A remote commit" -m "Some Commit body" --from-stdin
+    mkdir baz/deeper
+    ostree commit --repo=${test_tmpdir}/remote -b main -s "Add deeper" --add=baz/deeper
+    echo hi > baz/deeper/ohyeah
+    mkdir baz/another/
+    echo x > baz/another/y
+    find | grep -v '^\.$' | ostree commit --repo=${test_tmpdir}/remote -b main -s "The rest" --from-stdin
+    cd ..
+    rm -rf remote-files
+    
+    ${SRCDIR}/ostree-http-server > ${test_tmpdir}/remote-address &
+    cd ${oldpwd} 
 }
 
 trap 'die' EXIT

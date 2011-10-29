@@ -57,6 +57,7 @@ struct _OstreeRepoPrivate {
   char *path;
   GFile *repo_file;
   GFile *local_heads_dir;
+  GFile *remote_heads_dir;
   char *objects_path;
   char *config_path;
 
@@ -74,6 +75,7 @@ ostree_repo_finalize (GObject *object)
   g_free (priv->path);
   g_clear_object (&priv->repo_file);
   g_clear_object (&priv->local_heads_dir);
+  g_clear_object (&priv->remote_heads_dir);
   g_free (priv->objects_path);
   g_free (priv->config_path);
   if (priv->config)
@@ -140,6 +142,7 @@ ostree_repo_constructor (GType                  gtype,
   
   priv->repo_file = ot_util_new_file_for_path (priv->path);
   priv->local_heads_dir = g_file_resolve_relative_path (priv->repo_file, "refs/heads");
+  priv->remote_heads_dir = g_file_resolve_relative_path (priv->repo_file, "refs/remotes");
   
   priv->objects_path = g_build_filename (priv->path, "objects", NULL);
   priv->config_path = g_build_filename (priv->path, "config", NULL);
@@ -177,19 +180,6 @@ OstreeRepo*
 ostree_repo_new (const char *path)
 {
   return g_object_new (OSTREE_TYPE_REPO, "path", path, NULL);
-}
-
-static gboolean
-validate_checksum_string (const char *sha256,
-                          GError    **error)
-{
-  if (strlen (sha256) != 64)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Invalid rev '%s'", sha256);
-      return FALSE;
-    }
-  return TRUE;
 }
 
 static gboolean
@@ -252,7 +242,7 @@ parse_rev_file (OstreeRepo     *self,
     }
   else 
     {
-      if (!validate_checksum_string (rev, error))
+      if (!ostree_validate_checksum_string (rev, error))
         goto out;
     }
 
@@ -304,7 +294,7 @@ resolve_rev (OstreeRepo     *self,
        {
          g_strchomp (ret_rev);
          
-         if (!validate_checksum_string (ret_rev, error))
+         if (!ostree_validate_checksum_string (ret_rev, error))
            goto out;
        }
    }
@@ -357,6 +347,81 @@ write_checksum_file (GFile *parentdir,
   return ret;
 }
 
+/**
+ * ostree_repo_get_config:
+ * @self:
+ *
+ * Returns: (transfer none): The repository configuration; do not modify
+ */
+GKeyFile *
+ostree_repo_get_config (OstreeRepo *self)
+{
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+
+  g_return_val_if_fail (priv->inited, NULL);
+
+  return priv->config;
+}
+
+/**
+ * ostree_repo_copy_config:
+ * @self:
+ *
+ * Returns: (transfer full): A newly-allocated copy of the repository config
+ */
+GKeyFile *
+ostree_repo_copy_config (OstreeRepo *self)
+{
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GKeyFile *copy;
+  char *data;
+  gsize len;
+
+  g_return_val_if_fail (priv->inited, NULL);
+
+  copy = g_key_file_new ();
+  data = g_key_file_to_data (priv->config, &len, NULL);
+  if (!g_key_file_load_from_data (copy, data, len, 0, NULL))
+    g_assert_not_reached ();
+  g_free (data);
+  return copy;
+}
+
+/**
+ * ostree_repo_write_config:
+ * @self:
+ * @new_config: Overwrite the config file with this data.  Do not change later!
+ * @error: a #GError
+ *
+ * Save @new_config in place of this repository's config file.  Note
+ * that @new_config should not be modified after - this function
+ * simply adds a reference.
+ */
+gboolean
+ostree_repo_write_config (OstreeRepo *self,
+                          GKeyFile   *new_config,
+                          GError    **error)
+{
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  char *data = NULL;
+  gsize len;
+  gboolean ret = FALSE;
+
+  g_return_val_if_fail (priv->inited, FALSE);
+
+  data = g_key_file_to_data (new_config, &len, error);
+  if (!g_file_set_contents (priv->config_path, data, len, error))
+    goto out;
+  
+  g_key_file_unref (priv->config);
+  priv->config = g_key_file_ref (new_config);
+
+  ret = TRUE;
+ out:
+  g_free (data);
+  return ret;
+}
+
 gboolean
 ostree_repo_check (OstreeRepo *self, GError **error)
 {
@@ -400,6 +465,13 @@ ostree_repo_check (OstreeRepo *self, GError **error)
  out:
   g_free (version);
   return ret;
+}
+
+const char *
+ostree_repo_get_path (OstreeRepo  *self)
+{
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  return priv->path;
 }
 
 static gboolean
@@ -463,54 +535,13 @@ load_gvariant_object_unknown (OstreeRepo  *self,
                               GVariant     **out_variant,
                               GError       **error)
 {
-  GMappedFile *mfile = NULL;
   gboolean ret = FALSE;
-  GVariant *ret_variant = NULL;
-  GVariant *container = NULL;
   char *path = NULL;
-  guint32 ret_type;
 
   path = get_object_path (self, sha256, OSTREE_OBJECT_TYPE_META);
-  
-  mfile = g_mapped_file_new (path, FALSE, error);
-  if (mfile == NULL)
-    goto out;
-  else
-    {
-      container = g_variant_new_from_data (G_VARIANT_TYPE (OSTREE_SERIALIZED_VARIANT_FORMAT),
-                                           g_mapped_file_get_contents (mfile),
-                                           g_mapped_file_get_length (mfile),
-                                           FALSE,
-                                           (GDestroyNotify) g_mapped_file_unref,
-                                           mfile);
-      if (!g_variant_is_of_type (container, G_VARIANT_TYPE (OSTREE_SERIALIZED_VARIANT_FORMAT)))
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Corrupted metadata object '%s'", sha256);
-          goto out;
-        }
-      g_variant_get (container, "(uv)",
-                     &ret_type, &ret_variant);
-      mfile = NULL;
-    }
-
-  ret = TRUE;
- out:
-  if (!ret)
-    {
-      if (ret_variant)
-        g_variant_unref (ret_variant);
-    }
-  else
-    {
-      *out_type = ret_type;
-      *out_variant = ret_variant;
-    }
-  if (container != NULL)
-    g_variant_unref (container);
+  ret = ostree_parse_metadata_file (path, out_type, out_variant, error);
   g_free (path);
-  if (mfile != NULL)
-    g_mapped_file_unref (mfile);
+
   return ret;
 }
 
@@ -534,7 +565,6 @@ load_gvariant_object (OstreeRepo  *self,
                    "Corrupted metadata object '%s'; found type %u, expected %u", sha256,
                    type, (guint32)expected_type);
       goto out;
-      
     }
 
   ret = TRUE;
@@ -616,41 +646,25 @@ get_object_path (OstreeRepo  *self,
                  OstreeObjectType type)
 {
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
-  char *checksum_prefix;
-  char *base_path;
-  char *ret;
-  const char *type_string;
+  char *relpath;
 
-  checksum_prefix = g_strndup (checksum, 2);
-  base_path = g_build_filename (priv->objects_path, checksum_prefix, checksum + 2, NULL);
-  switch (type)
-    {
-    case OSTREE_OBJECT_TYPE_FILE:
-      type_string = ".file";
-      break;
-    case OSTREE_OBJECT_TYPE_META:
-      type_string = ".meta";
-      break;
-    default:
-      g_assert_not_reached ();
-    }
-  ret = g_strconcat (base_path, type_string, NULL);
-  g_free (base_path);
-  g_free (checksum_prefix);
+  relpath = ostree_get_relative_object_path (checksum, type);
+  ret = g_build_filename (priv->path, relpath, NULL);
+  g_free (relpath);
  
   return ret;
 }
 
 static char *
 prepare_dir_for_checksum_get_object_path (OstreeRepo *self,
-                                          GChecksum    *checksum,
+                                          const char   *checksum,
                                           OstreeObjectType type,
                                           GError      **error)
 {
   char *checksum_dir = NULL;
   char *object_path = NULL;
 
-  object_path = get_object_path (self, g_checksum_get_string (checksum), type);
+  object_path = get_object_path (self, checksum, type);
   checksum_dir = g_path_get_dirname (object_path);
 
   if (!ot_util_ensure_directory (checksum_dir, FALSE, error))
@@ -661,18 +675,21 @@ prepare_dir_for_checksum_get_object_path (OstreeRepo *self,
   return object_path;
 }
 
-static gboolean
-link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
-               gboolean ignore_exists, gboolean force,
-               GChecksum **out_checksum,
-               GError **error)
+gboolean      
+ostree_repo_store_object_trusted (OstreeRepo   *self,
+                                  const char   *path,
+                                  const char   *checksum,
+                                  OstreeObjectType objtype,
+                                  gboolean      ignore_exists,
+                                  gboolean      force,
+                                  gboolean     *did_exist,
+                                  GError      **error)
 {
   char *src_basename = NULL;
   char *src_dirname = NULL;
   char *dest_basename = NULL;
   char *tmp_dest_basename = NULL;
   char *dest_dirname = NULL;
-  GChecksum *id = NULL;
   DIR *src_dir = NULL;
   DIR *dest_dir = NULL;
   gboolean ret = FALSE;
@@ -689,9 +706,7 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
       goto out;
     }
 
-  if (!ostree_stat_and_checksum_file (dirfd (src_dir), path, &id, &stbuf, error))
-    goto out;
-  dest_path = prepare_dir_for_checksum_get_object_path (self, id, type, error);
+  dest_path = prepare_dir_for_checksum_get_object_path (self, checksum, type, error);
   if (!dest_path)
     goto out;
 
@@ -719,7 +734,11 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
           ot_util_set_error_from_errno (error, errno);
           goto out;
         }
+      else
+        *did_exist = TRUE;
     }
+  else
+    *did_exist = FALSE;
 
   if (force)
     {
@@ -732,12 +751,8 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
       (void) unlinkat (dirfd (dest_dir), tmp_dest_basename, 0);
     }
 
-  *out_checksum = id;
-  id = NULL;
   ret = TRUE;
  out:
-  if (id != NULL)
-    g_checksum_free (id);
   if (src_dir != NULL)
     closedir (src_dir);
   if (dest_dir != NULL)
@@ -748,6 +763,31 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
   g_free (tmp_dest_basename);
   g_free (dest_dirname);
   return ret;
+}
+
+static gboolean
+link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
+               gboolean ignore_exists, gboolean force,
+               GChecksum **out_checksum,
+               GError **error)
+{
+  struct stat stbuf;
+  GChecksum *id = NULL;
+  gboolean did_exist;
+
+  if (!ostree_stat_and_checksum_file (dirfd (src_dir), path, &id, &stbuf, error))
+    goto out;
+
+  if (!ostree_repo_store_object_trusted (self, path, g_checksum_get_string (id), type,
+                                         ignore_exists, force, &did_exist, error))
+    goto out;
+
+  *out_checksum = id;
+  id = NULL;
+  ret = TRUE;
+ out:
+  if (id != NULL)
+    g_checksum_free (id);
 }
 
 gboolean
@@ -839,6 +879,7 @@ parse_tree (OstreeRepo    *self,
                              sha256, &tree_variant, error))
     goto out;
 
+  /* PARSE OSTREE_SERIALIZED_TREE_VARIANT */
   g_variant_get (tree_variant, "(u@a{sv}@a(ss)@a(sss))",
                  &version, &meta_variant, &files_variant, &dirs_variant);
 
@@ -922,6 +963,7 @@ load_commit_and_trees (OstreeRepo   *self,
                              commit_sha256, &ret_commit, error))
     goto out;
 
+  /* PARSE OSTREE_SERIALIZED_COMMIT_VARIANT */
   g_variant_get_child (ret_commit, 6, "&s", &tree_contents_checksum);
   g_variant_get_child (ret_commit, 7, "&s", &tree_meta_checksum);
 
@@ -1366,6 +1408,17 @@ add_files_to_tree_and_import (OstreeRepo   *self,
   return ret;
 }
 
+gboolean      
+ostree_repo_write_ref (OstreeRepo  *self,
+                       gboolean     is_local,
+                       const char  *name,
+                       const char  *rev,
+                       GError     **error)
+{
+  return write_checksum_file (is_local ? priv->local_heads_dir : priv->remote_heads_dir, 
+                              name, rev, error))
+}
+
 static gboolean
 commit_parsed_tree (OstreeRepo *self,
                     const char   *branch,
@@ -1403,7 +1456,7 @@ commit_parsed_tree (OstreeRepo *self,
                                commit, &ret_commit, error))
     goto out;
 
-  if (!write_checksum_file (priv->local_heads_dir, branch, g_checksum_get_string (ret_commit), error))
+  if (!ostree_repo_write_ref (self, TRUE, branch, g_checksum_get_string (ret_commit), error))
     goto out;
 
   ret = TRUE;
@@ -1789,6 +1842,7 @@ checkout_one_directory (OstreeRepo  *self,
 
   dest_path = g_build_filename (destination, dirname, NULL);
       
+  /* PARSE OSTREE_SERIALIZED_DIRMETA_VARIANT */
   g_variant_get (dir->meta_data, "(uuuu@a(ayay))",
                  &version, &uid, &gid, &mode,
                  &xattr_variant);

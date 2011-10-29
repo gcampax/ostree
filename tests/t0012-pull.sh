@@ -1,4 +1,4 @@
-# Toplevel tests Makefile
+#!/bin/bash
 #
 # Copyright (C) 2011 Colin Walters <walters@verbum.org>
 #
@@ -18,16 +18,16 @@
 #
 # Author: Colin Walters <walters@verbum.org>
 
-TESTS = $(wildcard t[0-9][0-9][0-9][0-9]-*.sh)
+set -e
 
-all: ostree-http-server
+. libtest.sh
 
-ostree-http-server: ostree-http-server.c Makefile
-	gcc $(CFLAGS) `pkg-config --cflags --libs libsoup-gnome-2.4` -o ostree-http-server $<
+echo '1..1'
 
-check:
-	@for test in $(TESTS); do \
-	  echo $$test; \
-	  ./$$test; \
-	done
-
+setup_fake_remote_repo1
+cd ${test_tmpdir}
+mkdir repo
+ostree init --repo=repo
+ostree remote --repo=repo add origin $(cat remote-address)/remote
+ostree pull --repo=repo origin main
+echo "ok pull"

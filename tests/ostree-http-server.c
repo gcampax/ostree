@@ -39,7 +39,10 @@ request_callback (SoupServer *server, SoupMessage *msg,
       file = g_file_new_for_path (path + 1);
       
       if (g_file_load_contents (file, NULL, &content, &len, NULL, NULL))
-	soup_message_set_response (msg, "application/octet-stream", SOUP_MEMORY_TAKE, content, len);
+	{
+	  soup_message_set_response (msg, "application/octet-stream", SOUP_MEMORY_TAKE, content, len);
+	  soup_message_set_status (msg, SOUP_STATUS_OK);
+	}
       else
 	soup_message_set_status (msg, SOUP_STATUS_NOT_FOUND);
     }

@@ -27,6 +27,20 @@
 #include <sys/types.h>
 #include <attr/xattr.h>
 
+gboolean
+ostree_validate_checksum_string (const char *sha256,
+                                 GError    **error)
+{
+  if (strlen (sha256) != 64)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid rev '%s'", sha256);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+
 static char *
 stat_to_string (struct stat *stbuf)
 {
@@ -269,4 +283,83 @@ ostree_stat_and_checksum_file (int dir_fd, const char *path,
     g_checksum_free (content_sha256);
 
   return ret;
+}
+
+gboolean
+ostree_parse_metadata_file (const char                  *path,
+                            OstreeSerializedVariantType *out_type,
+                            GVariant                   **out_variant,
+                            GError                     **error)
+{
+  GMappedFile *mfile = NULL;
+  gboolean ret = FALSE;
+  GVariant *ret_variant = NULL;
+  GVariant *container = NULL;
+  guint32 ret_type;
+
+  mfile = g_mapped_file_new (path, FALSE, error);
+  if (mfile == NULL)
+    {
+      goto out;
+    }
+  else
+    {
+      container = g_variant_new_from_data (G_VARIANT_TYPE (OSTREE_SERIALIZED_VARIANT_FORMAT),
+                                           g_mapped_file_get_contents (mfile),
+                                           g_mapped_file_get_length (mfile),
+                                           FALSE,
+                                           (GDestroyNotify) g_mapped_file_unref,
+                                           mfile);
+      g_variant_get (container, "(uv)",
+                     &ret_type, &ret_variant);
+      if (ret_type <= 0 || ret_type > OSTREE_SERIALIZED_VARIANT_LAST)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Corrupted metadata object '%s'; invalid type %d", path, ret_type);
+          goto out;
+        }
+      mfile = NULL;
+    }
+
+  ret = TRUE;
+  *out_type = ret_type;
+  *out_variant = ret_variant;
+  ret_variant = NULL;
+ out:
+  if (ret_variant)
+    g_variant_unref (ret_variant);
+  if (container != NULL)
+    g_variant_unref (container);
+  if (mfile != NULL)
+    g_mapped_file_unref (mfile);
+  return ret;
+}
+
+char *
+ostree_get_relative_object_path (const char *checksum,
+                                 OstreeObjectType type)
+{
+  GString *path;
+  const char *type_string;
+
+  g_assert (strlen (checksum) == 64);
+
+  path = g_string_new ("objects/");
+
+  g_string_append_len (path, checksum, 2);
+  g_string_append_c (path, '/');
+  g_string_append (path, checksum + 2);
+  switch (type)
+    {
+    case OSTREE_OBJECT_TYPE_FILE:
+      type_string = ".file";
+      break;
+    case OSTREE_OBJECT_TYPE_META:
+      type_string = ".meta";
+      break;
+    default:
+      g_assert_not_reached ();
+    }
+  g_string_append (path, type_string);
+  return g_string_free (path, FALSE);
 }
