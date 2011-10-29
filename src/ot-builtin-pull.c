@@ -115,13 +115,14 @@ store_object (OstreeRepo  *repo,
   char *relpath = NULL;
   SoupURI *obj_uri = NULL;
   GChecksum *checksum = NULL;
+  struct stat stbuf;
 
-  objpath = ostree_get_relative_object_path (rev, objtype);
+  objpath = ostree_get_relative_object_path (object, objtype);
   obj_uri = soup_uri_copy (baseuri);
   relpath = g_build_filename (soup_uri_get_path (obj_uri), objpath, NULL);
   soup_uri_set_path (obj_uri, relpath);
 
-  if (!fetch_uri (repo, soup, relpath, &filename, error))
+  if (!fetch_uri (repo, soup, obj_uri, &filename, error))
     goto out;
 
   if (!ostree_stat_and_checksum_file (-1, filename, &checksum,
@@ -136,33 +137,35 @@ store_object (OstreeRepo  *repo,
       goto out;
     }
 
-  if (!ostree_repo_store_object_trusted (repo, filename, object, TRUE, FALSE, did_exist, error))
+  if (!ostree_repo_store_object_trusted (repo, filename, object, objtype, TRUE, FALSE, did_exist, error))
     goto out;
 
   ret = TRUE;
-  *temp_filename = ret_filename;
-  ret_filename = NULL;
  out:
   if (checksum)
     g_checksum_free (checksum);
   if (obj_uri)
     soup_uri_free (obj_uri);
-  g_free (ret_filename);
+  g_free (filename);
   g_free (objpath);
+  g_free (relpath);
   return ret;
 }
 
 static gboolean
 store_tree_recurse (OstreeRepo   *repo,
-                    SoupSession  *session,
-                    SoupURI      *baseuri,
+                    SoupSession  *soup,
+                    SoupURI      *base_uri,
                     const char   *rev,
                     GError      **error)
 {
   gboolean ret = FALSE;
   GVariant *tree = NULL;
+  GVariant *files_variant = NULL;
+  GVariant *dirs_variant = NULL;
   OstreeSerializedVariantType metatype;
   gboolean did_exist;
+  int i, n;
 
   if (!store_object (repo, soup, base_uri, rev, OSTREE_OBJECT_TYPE_META, &did_exist, error))
     goto out;
@@ -181,24 +184,53 @@ store_tree_recurse (OstreeRepo   *repo,
         }
       
       /* PARSE OSTREE_SERIALIZED_TREE_VARIANT */
-      g_variant_get_child (commit, 2, "@a(ss)", &files_variant);
-      g_variant_get_child (commit, 3, "@a(sss)", &dirs_variant);
+      g_variant_get_child (tree, 2, "@a(ss)", &files_variant);
+      g_variant_get_child (tree, 3, "@a(sss)", &dirs_variant);
+      
+      n = g_variant_n_children (files_variant);
+      for (i = 0; i < n; i++)
+        {
+          const char *filename;
+          const char *checksum;
 
-      store files_variant
-      store dirs_variant
+          g_variant_get_child (files_variant, i, "(ss)", &filename, &checksum);
+
+          if (!store_object (repo, soup, base_uri, checksum, OSTREE_OBJECT_TYPE_FILE, &did_exist, error))
+            goto out;
+        }
+      
+      for (i = 0; i < n; i++)
+        {
+          const char *dirname;
+          const char *tree_checksum;
+          const char *meta_checksum;
+
+          g_variant_get_child (dirs_variant, i, "(sss)",
+                               &dirname, &tree_checksum, &meta_checksum);
+
+          if (!store_tree_recurse (repo, soup, base_uri, tree_checksum, error))
+            goto out;
+
+          if (!store_object (repo, soup, base_uri, meta_checksum, OSTREE_OBJECT_TYPE_META, &did_exist, error))
+            goto out;
+        }
     }
 
   ret = TRUE;
  out:
-  if (commit)
-    g_variant_unref (commit);
+  if (tree)
+    g_variant_unref (tree);
+  if (files_variant)
+    g_variant_unref (files_variant);
+  if (dirs_variant)
+    g_variant_unref (dirs_variant);
   return ret;
 }
 
 static gboolean
 store_commit_recurse (OstreeRepo   *repo,
-                      SoupSession  *session,
-                      SoupURI      *baseuri,
+                      SoupSession  *soup,
+                      SoupURI      *base_uri,
                       const char   *rev,
                       GError      **error)
 {
@@ -221,7 +253,7 @@ store_commit_recurse (OstreeRepo   *repo,
         {
           g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                        "Commit '%s' has wrong type %d, expected %d",
-                       branch, metatype, OSTREE_SERIALIZED_COMMIT_VARIANT);
+                       rev, metatype, OSTREE_SERIALIZED_COMMIT_VARIANT);
           goto out;
         }
       
@@ -229,10 +261,10 @@ store_commit_recurse (OstreeRepo   *repo,
       g_variant_get_child (commit, 6, "&s", &tree_contents_checksum);
       g_variant_get_child (commit, 7, "&s", &tree_meta_checksum);
       
-      if (!store_object (repo, session, baseuri, tree_meta_checksum, error))
+      if (!store_object (repo, soup, base_uri, tree_meta_checksum, OSTREE_OBJECT_TYPE_META, &did_exist, error))
         goto out;
       
-      if (!store_tree_recurse (repo, session, baseuri, tree_contents_checksum, error))
+      if (!store_tree_recurse (repo, soup, base_uri, tree_contents_checksum, error))
         goto out;
     }
 
@@ -249,7 +281,6 @@ ostree_builtin_pull (int argc, char **argv, const char *prefix, GError **error)
   GOptionContext *context;
   gboolean ret = FALSE;
   OstreeRepo *repo = NULL;
-  OstreeCheckout *checkout = NULL;
   const char *remote;
   const char *branch;
   char *remote_branch_ref_path = NULL;
@@ -262,7 +293,6 @@ ostree_builtin_pull (int argc, char **argv, const char *prefix, GError **error)
   SoupURI *target_uri = NULL;
   SoupSession *soup = NULL;
   char *rev = NULL;
-  gsize len;
 
   context = g_option_context_new ("REMOTE BRANCH - Download data from remote repository");
   g_option_context_add_main_entries (context, options, NULL);
@@ -312,7 +342,8 @@ ostree_builtin_pull (int argc, char **argv, const char *prefix, GError **error)
   if (!fetch_uri (repo, soup, target_uri, &temppath, error))
     goto out;
 
-  if (!ot_util_get_file_contents_utf8 (temppath, &rev, error))
+  rev = ot_util_get_file_contents_utf8 (temppath, error);
+  if (!rev)
     goto out;
 
   if (!ostree_validate_checksum_string (rev, error))
@@ -321,7 +352,8 @@ ostree_builtin_pull (int argc, char **argv, const char *prefix, GError **error)
   if (!store_commit_recurse (repo, soup, base_uri, rev, error))
     goto out;
 
-  if (!g_file_
+  if (!ostree_repo_write_ref (repo, FALSE, branch, rev, error))
+    goto out;
  
   ret = TRUE;
  out:
@@ -340,9 +372,7 @@ ostree_builtin_pull (int argc, char **argv, const char *prefix, GError **error)
     soup_uri_free (base_uri);
   if (target_uri)
     soup_uri_free (target_uri);
-  if (commit)
-    g_variant_unref (commit);
   g_clear_object (&repo);
-  g_clear_object (&checkout);
+  g_clear_object (&soup);
   return ret;
 }

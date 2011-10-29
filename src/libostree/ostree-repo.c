@@ -646,6 +646,7 @@ get_object_path (OstreeRepo  *self,
                  OstreeObjectType type)
 {
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  char *ret;
   char *relpath;
 
   relpath = ostree_get_relative_object_path (checksum, type);
@@ -693,7 +694,6 @@ ostree_repo_store_object_trusted (OstreeRepo   *self,
   DIR *src_dir = NULL;
   DIR *dest_dir = NULL;
   gboolean ret = FALSE;
-  struct stat stbuf;
   char *dest_path = NULL;
 
   src_basename = g_path_get_basename (path);
@@ -706,7 +706,7 @@ ostree_repo_store_object_trusted (OstreeRepo   *self,
       goto out;
     }
 
-  dest_path = prepare_dir_for_checksum_get_object_path (self, checksum, type, error);
+  dest_path = prepare_dir_for_checksum_get_object_path (self, checksum, objtype, error);
   if (!dest_path)
     goto out;
 
@@ -771,11 +771,12 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
                GChecksum **out_checksum,
                GError **error)
 {
+  gboolean ret = FALSE;
   struct stat stbuf;
   GChecksum *id = NULL;
   gboolean did_exist;
 
-  if (!ostree_stat_and_checksum_file (dirfd (src_dir), path, &id, &stbuf, error))
+  if (!ostree_stat_and_checksum_file (-1, path, &id, &stbuf, error))
     goto out;
 
   if (!ostree_repo_store_object_trusted (self, path, g_checksum_get_string (id), type,
@@ -788,6 +789,7 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
  out:
   if (id != NULL)
     g_checksum_free (id);
+  return ret;
 }
 
 gboolean
@@ -1415,8 +1417,9 @@ ostree_repo_write_ref (OstreeRepo  *self,
                        const char  *rev,
                        GError     **error)
 {
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
   return write_checksum_file (is_local ? priv->local_heads_dir : priv->remote_heads_dir, 
-                              name, rev, error))
+                              name, rev, error);
 }
 
 static gboolean
@@ -1430,7 +1433,6 @@ commit_parsed_tree (OstreeRepo *self,
                     GChecksum   **out_commit,
                     GError      **error)
 {
-  OstreeRepoPrivate *priv = GET_PRIVATE (self);
   gboolean ret = FALSE;
   GChecksum *root_checksum = NULL;
   GChecksum *ret_commit = NULL;
