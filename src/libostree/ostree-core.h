@@ -99,6 +99,7 @@ gboolean ostree_parse_metadata_file (const char                  *path,
                                      GError                     **error);
 
 gboolean ostree_stat_and_checksum_file (int dirfd, const char *path,
+                                        OstreeObjectType type,
                                         GChecksum **out_checksum,
                                         struct stat *out_stbuf,
                                         GError **error);

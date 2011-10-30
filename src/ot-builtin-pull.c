@@ -125,7 +125,7 @@ store_object (OstreeRepo  *repo,
   if (!fetch_uri (repo, soup, obj_uri, &filename, error))
     goto out;
 
-  if (!ostree_stat_and_checksum_file (-1, filename, &checksum,
+  if (!ostree_stat_and_checksum_file (-1, filename, objtype, &checksum,
                                       &stbuf, error))
     goto out;
 
@@ -345,6 +345,7 @@ ostree_builtin_pull (int argc, char **argv, const char *prefix, GError **error)
   rev = ot_util_get_file_contents_utf8 (temppath, error);
   if (!rev)
     goto out;
+  g_strchomp (rev);
 
   if (!ostree_validate_checksum_string (rev, error))
     goto out;

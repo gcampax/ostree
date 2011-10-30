@@ -776,7 +776,7 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
   GChecksum *id = NULL;
   gboolean did_exist;
 
-  if (!ostree_stat_and_checksum_file (-1, path, &id, &stbuf, error))
+  if (!ostree_stat_and_checksum_file (-1, path, type, &id, &stbuf, error))
     goto out;
 
   if (!ostree_repo_store_object_trusted (self, path, g_checksum_get_string (id), type,
@@ -794,10 +794,10 @@ link_one_file (OstreeRepo *self, const char *path, OstreeObjectType type,
 
 gboolean
 ostree_repo_link_file (OstreeRepo *self,
-                         const char   *path,
-                         gboolean      ignore_exists,
-                         gboolean      force,
-                         GError      **error)
+                       const char   *path,
+                       gboolean      ignore_exists,
+                       gboolean      force,
+                       GError      **error)
 {
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   GChecksum *checksum = NULL;

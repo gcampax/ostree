@@ -19,6 +19,7 @@
 # Author: Colin Walters <walters@verbum.org>
 
 set -e
+set -x
 
 . libtest.sh
 

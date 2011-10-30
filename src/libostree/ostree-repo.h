@@ -64,10 +64,10 @@ gboolean      ostree_repo_write_config (OstreeRepo *self,
                                         GError    **error);
 
 gboolean      ostree_repo_link_file (OstreeRepo *self,
-                                       const char   *path,
-                                       gboolean      ignore_exists,
-                                       gboolean      force,
-                                       GError      **error);
+                                     const char   *path,
+                                     gboolean      ignore_exists,
+                                     gboolean      force,
+                                     GError      **error);
 
 gboolean      ostree_repo_store_object_trusted (OstreeRepo   *self,
                                                 const char   *path,

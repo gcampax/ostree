@@ -168,9 +168,10 @@ ostree_get_xattrs_for_path (const char *path,
 
 gboolean
 ostree_stat_and_checksum_file (int dir_fd, const char *path,
-                                 GChecksum **out_checksum,
-                                 struct stat *out_stbuf,
-                                 GError **error)
+                               OstreeObjectType objtype,
+                               GChecksum **out_checksum,
+                               struct stat *out_stbuf,
+                               GError **error)
 {
   GChecksum *content_sha256 = NULL;
   GChecksum *content_and_meta_sha256 = NULL;
@@ -216,10 +217,13 @@ ostree_stat_and_checksum_file (int dir_fd, const char *path,
         }
     }
 
-  stat_string = stat_to_string (&stbuf);
-  xattrs = ostree_get_xattrs_for_path (path, error);
-  if (!xattrs)
-    goto out;
+  if (objtype == OSTREE_OBJECT_TYPE_FILE)
+    {
+      stat_string = stat_to_string (&stbuf);
+      xattrs = ostree_get_xattrs_for_path (path, error);
+      if (!xattrs)
+        goto out;
+    }
 
   content_sha256 = g_checksum_new (G_CHECKSUM_SHA256);
  
@@ -238,6 +242,8 @@ ostree_stat_and_checksum_file (int dir_fd, const char *path,
   else if (S_ISLNK(stbuf.st_mode))
     {
       symlink_target = g_malloc (PATH_MAX);
+
+      g_assert (objtype == OSTREE_OBJECT_TYPE_FILE);
       
       bytes_read = readlinkat (dir_fd, basename, symlink_target, PATH_MAX);
       if (bytes_read < 0)
@@ -249,6 +255,7 @@ ostree_stat_and_checksum_file (int dir_fd, const char *path,
     }
   else if (S_ISCHR(stbuf.st_mode) || S_ISBLK(stbuf.st_mode))
     {
+      g_assert (objtype == OSTREE_OBJECT_TYPE_FILE);
       device_id = g_strdup_printf ("%u", (guint)stbuf.st_rdev);
       g_checksum_update (content_sha256, (guint8*)device_id, strlen (device_id));
     }
@@ -263,8 +270,11 @@ ostree_stat_and_checksum_file (int dir_fd, const char *path,
 
   content_and_meta_sha256 = g_checksum_copy (content_sha256);
 
-  g_checksum_update (content_and_meta_sha256, (guint8*)stat_string, strlen (stat_string));
-  g_checksum_update (content_and_meta_sha256, (guint8*)g_variant_get_data (xattrs), g_variant_get_size (xattrs));
+  if (objtype == OSTREE_OBJECT_TYPE_FILE)
+    {
+      g_checksum_update (content_and_meta_sha256, (guint8*)stat_string, strlen (stat_string));
+      g_checksum_update (content_and_meta_sha256, (guint8*)g_variant_get_data (xattrs), g_variant_get_size (xattrs));
+    }
 
   *out_stbuf = stbuf;
   *out_checksum = content_and_meta_sha256;

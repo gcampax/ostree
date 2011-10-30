@@ -53,6 +53,7 @@ object_iter_callback (OstreeRepo  *repo,
   char *checksum_prefix = NULL;
   char *checksum_string = NULL;
   char *filename_checksum = NULL;
+  OstreeObjectType objtype;
   char *dot;
 
   dirname = g_path_get_dirname (path);
@@ -62,7 +63,14 @@ object_iter_callback (OstreeRepo  *repo,
      if (nlinks < 2 && !quiet)
      g_printerr ("note: floating object: %s\n", path); */
 
-  if (!ostree_stat_and_checksum_file (-1, path, &checksum, &stbuf, &error))
+  if (g_str_has_suffix (path, ".meta"))
+    objtype = OSTREE_OBJECT_TYPE_META;
+  else if (g_str_has_suffix (path, ".file"))
+    objtype = OSTREE_OBJECT_TYPE_FILE;
+  else
+    g_assert_not_reached ();
+
+  if (!ostree_stat_and_checksum_file (-1, path, objtype, &checksum, &stbuf, &error))
     goto out;
 
   filename_checksum = g_strdup (g_file_info_get_name (file_info));
