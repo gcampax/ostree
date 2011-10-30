@@ -20,10 +20,13 @@
 
 TESTS = $(wildcard t[0-9][0-9][0-9][0-9]-*.sh)
 
-all: ostree-http-server
+all: tmpdir-lifecycle run-apache
 
-ostree-http-server: ostree-http-server.c Makefile
-	gcc $(CFLAGS) `pkg-config --cflags --libs libsoup-gnome-2.4` -o ostree-http-server $<
+tmpdir-lifecycle: tmpdir-lifecycle.c Makefile
+	gcc $(CFLAGS) `pkg-config --cflags --libs gio-unix-2.0` -o $@ $<
+
+run-apache: run-apache.c Makefile
+	gcc $(CFLAGS) `pkg-config --cflags --libs gio-unix-2.0` -o $@ $<
 
 check:
 	@for test in $(TESTS); do \

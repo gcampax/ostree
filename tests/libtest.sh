@@ -96,25 +96,45 @@ setup_test_repository2 () {
 
 setup_fake_remote_repo1() {
     oldpwd=`pwd`
-    mkdir remote
-    ostree init --repo=remote
-    mkdir remote-files
-    cd remote-files 
+    mkdir ostree-srv
+    cd ostree-srv
+    mkdir gnomerepo
+    ostree init --repo=gnomerepo
+    mkdir gnomerepo-files
+    cd gnomerepo-files 
     echo first > firstfile
     mkdir baz
     echo moo > baz/cow
     echo alien > baz/saucer
-    find | grep -v '^\.$' | ostree commit --repo=${test_tmpdir}/remote -b main -s "A remote commit" -m "Some Commit body" --from-stdin
+    find | grep -v '^\.$' | ostree commit --repo=${test_tmpdir}/ostree-srv/gnomerepo -b main -s "A remote commit" -m "Some Commit body" --from-stdin
     mkdir baz/deeper
-    ostree commit --repo=${test_tmpdir}/remote -b main -s "Add deeper" --add=baz/deeper
+    ostree commit --repo=${test_tmpdir}/ostree-srv/gnomerepo -b main -s "Add deeper" --add=baz/deeper
     echo hi > baz/deeper/ohyeah
     mkdir baz/another/
     echo x > baz/another/y
-    find | grep -v '^\.$' | ostree commit --repo=${test_tmpdir}/remote -b main -s "The rest" --from-stdin
+    find | grep -v '^\.$' | ostree commit --repo=${test_tmpdir}/ostree-srv/gnomerepo -b main -s "The rest" --from-stdin
     cd ..
-    rm -rf remote-files
+    rm -rf gnomerepo-files
     
-    ${SRCDIR}/ostree-http-server > ${test_tmpdir}/remote-address &
+    cd ${test_tmpdir}
+    mkdir ${test_tmpdir}/httpd
+    cd httpd
+    cat >httpd.conf <<EOF
+ServerRoot ${test_tmpdir}/httpd
+PidFile pid
+LogLevel crit
+ErrorLog log
+LockFile lock
+ServerName localhost
+
+LoadModule alias_module modules/mod_alias.so
+LoadModule cgi_module modules/mod_cgi.so
+LoadModule env_module modules/mod_env.so
+
+SetEnv OSTREE_PROJECT_ROOT ${test_tmpdir}/ostree-srv
+ScriptAlias /ostree/  ${test_tmpdir}/ostree-http-backend/
+EOF
+    ${SRCDIR}/tmpdir-lifecycle ${SRCDIR}/run-apache `pwd`/httpd.conf ${test_tmpdir}/httpd-address
     cd ${oldpwd} 
 }
 

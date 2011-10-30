@@ -29,6 +29,6 @@ setup_fake_remote_repo1
 cd ${test_tmpdir}
 mkdir repo
 ostree init --repo=repo
-ostree remote --repo=repo add origin $(cat remote-address)/remote
+ostree remote --repo=repo add origin $(cat httpd-address)/gnomerepo
 ostree pull --repo=repo origin main
 echo "ok pull"
