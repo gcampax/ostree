@@ -18,7 +18,6 @@
  *
  * Author: Colin Walters <walters@verbum.org>
  */
-/* ostree-repo.h */
 
 #ifndef _OSTREE_REPO
 #define _OSTREE_REPO
