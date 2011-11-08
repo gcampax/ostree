@@ -29,7 +29,7 @@ struct _OstreeRepoFileEnumerator
   GFileEnumerator parent;
 
   OstreeRepoFile *dir;
-  GFileAttributeMatcher *matcher;
+  char *attributes;
   GFileQueryInfoFlags flags;
 
   int index;
@@ -54,7 +54,7 @@ ostree_repo_file_enumerator_dispose (GObject *object)
   self = OSTREE_REPO_FILE_ENUMERATOR (object);
 
   g_clear_object (&self->dir);
-  g_file_attribute_matcher_unref (self->matcher);
+  g_free (self->attributes);
   
   if (G_OBJECT_CLASS (ostree_repo_file_enumerator_parent_class)->dispose)
     G_OBJECT_CLASS (ostree_repo_file_enumerator_parent_class)->dispose (object);
@@ -99,15 +99,15 @@ _ostree_repo_file_enumerator_new (OstreeRepoFile       *dir,
 {
   OstreeRepoFileEnumerator *self;
   
-  self = g_object_new (G_TYPE_LOCAL_FILE_ENUMERATOR,
+  self = g_object_new (OSTREE_TYPE_REPO_FILE_ENUMERATOR,
 		       "container", dir,
 		       NULL);
 
   self->dir = g_object_ref (dir);
-  self->matcher = g_file_attribute_matcher_new (attributes);
+  self->attributes = g_strdup (attributes);
   self->flags = flags;
   
-  return G_FILE_ENUMERATOR (local);
+  return G_FILE_ENUMERATOR (self);
 }
 
 static GFileInfo *
@@ -118,28 +118,14 @@ ostree_repo_file_enumerator_next_file (GFileEnumerator  *enumerator,
   OstreeRepoFileEnumerator *self = OSTREE_REPO_FILE_ENUMERATOR (enumerator);
   gboolean ret = FALSE;
   GFileInfo *info = NULL;
-  GFile *temp_child = NULL;
-  GVariant *tree_contents = NULL;
-  int n;
-  const char *name;
-  const char *checksum;
 
-  tree_contents = _ostree_repo_file_tree_get_contents (self->dir);
-  n = g_variant_n_children (tree_contents);
+  if (!_ostree_repo_file_tree_query_child (self->dir, self->index,
+                                           self->attributes, self->flags,
+                                           &info, cancellable, error))
+    goto out;
 
-  g_variant_get_child (
-
-  if (self->i >= n)
-    {
-      ret = TRUE;
-      goto out;
-    }
-
-  temp_child = g_file
-  if (
-
+  ret = TRUE;
  out:
- g_clear_object (&temp_child);
   if (!ret)
     g_clear_object (&info);
   return info;
@@ -150,17 +136,5 @@ ostree_repo_file_enumerator_close (GFileEnumerator  *enumerator,
 				   GCancellable     *cancellable,
 				   GError          **error)
 {
-  OstreeRepoFileEnumerator *self = OSTREE_REPO_FILE_ENUMERATOR (enumerator);
-
-  if (self->dir)
-    {
-#ifdef USE_GDIR
-      g_dir_close (self->dir);
-#else
-      closedir (self->dir);
-#endif
-      self->dir = NULL;
-    }
-
   return TRUE;
 }

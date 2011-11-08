@@ -128,10 +128,16 @@ gboolean ostree_stat_and_checksum_file (int dirfd, const char *path,
 #define OSTREE_PACK_FILE_VARIANT_FORMAT "(uuuua(ayay)t)"
 
 gboolean  ostree_pack_object (GOutputStream     *output,
-                              GFile             *path,
+                              GFile             *file,
                               OstreeObjectType  objtype,
                               GCancellable     *cancellable,
                               GError          **error);
+
+gboolean ostree_parse_packed_file (GFile            *file,
+                                   GVariant    **out_metadata,
+                                   GInputStream **out_content,
+                                   GCancellable *cancellable,
+                                   GError      **error);
 
 gboolean ostree_unpack_object (const char   *path,
                                OstreeObjectType  objtype,

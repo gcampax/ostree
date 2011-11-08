@@ -22,7 +22,7 @@
 #ifndef _OSTREE_REPO_FILE
 #define _OSTREE_REPO_FILE
 
-#include <gio/gio.h>
+#include "ostree-repo.h"
 
 G_BEGIN_DECLS
 
@@ -43,18 +43,38 @@ struct _OstreeRepoFileClass
 
 GType   _ostree_repo_file_get_type (void) G_GNUC_CONST;
 
-GFile * _ostree_repo_file_new (OstreeRepo  *repo,
-                               const char  *commit,
-                               const char  *path);
+GFile * _ostree_repo_file_new_root (OstreeRepo  *repo,
+                                    const char  *commit);
+
+GFile * _ostree_repo_file_new_child (OstreeRepoFile *parent,
+                                     const char  *name);
 
 gboolean _ostree_repo_file_ensure_resolved (OstreeRepoFile  *self,
                                             GError         **error);
 
-const char * _ostree_repo_file_get_relpath (OstreeRepoFile  *self);
+OstreeRepo * _ostree_repo_file_get_repo (OstreeRepoFile  *self);
+OstreeRepoFile * _ostree_repo_file_get_root (OstreeRepoFile  *self);
 
 gboolean _ostree_repo_file_is_tree (OstreeRepoFile  *self);
 
+const char * _ostree_repo_file_nontree_get_checksum (OstreeRepoFile  *self);
+
 GFile *_ostree_repo_file_nontree_get_local (OstreeRepoFile  *self);
+
+int     _ostree_repo_file_tree_find_child  (OstreeRepoFile  *self,
+                                            const char      *name);
+
+const char *_ostree_repo_file_tree_get_child_checksum (OstreeRepoFile  *self,
+                                                       int n);
+
+gboolean _ostree_repo_file_tree_query_child (OstreeRepoFile  *self,
+                                             int              n,
+                                             const char      *attributes,
+                                             GFileQueryInfoFlags flags,
+                                             GFileInfo      **out_info,
+                                             GCancellable    *cancellable,
+                                             GError         **error);
+
 GVariant *_ostree_repo_file_tree_get_contents (OstreeRepoFile  *self);
 GVariant *_ostree_repo_file_tree_get_metadata (OstreeRepoFile  *self);
 

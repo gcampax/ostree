@@ -35,10 +35,6 @@ link_one_file (OstreeRepo *self, const char *path,
                gboolean ignore_exists, gboolean force,
                GChecksum **out_checksum,
                GError **error);
-static char *
-get_object_path (OstreeRepo  *self,
-                 const char    *checksum,
-                 OstreeObjectType type);
 
 enum {
   PROP_0,
@@ -683,10 +679,10 @@ import_directory_meta (OstreeRepo  *self,
   return ret;
 }
 
-static char *
-get_object_path (OstreeRepo  *self,
-                 const char    *checksum,
-                 OstreeObjectType type)
+char *
+ostree_repo_get_object_path (OstreeRepo  *self,
+                             const char    *checksum,
+                             OstreeObjectType type)
 {
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   char *ret;
@@ -708,7 +704,7 @@ prepare_dir_for_checksum_get_object_path (OstreeRepo *self,
   char *checksum_dir = NULL;
   char *object_path = NULL;
 
-  object_path = get_object_path (self, checksum, type);
+  object_path = ostree_repo_get_object_path (self, checksum, type);
   checksum_dir = g_path_get_dirname (object_path);
 
   if (!ot_util_ensure_directory (checksum_dir, FALSE, error))
@@ -2003,7 +1999,7 @@ ostree_repo_load_variant (OstreeRepo *self,
 
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
-  path = get_object_path (self, sha256, OSTREE_OBJECT_TYPE_META);
+  path = ostree_repo_get_object_path (self, sha256, OSTREE_OBJECT_TYPE_META);
   if (!ostree_parse_metadata_file (path, &ret_type, &ret_variant, error))
     goto out;
 
@@ -2086,7 +2082,7 @@ checkout_tree (OstreeRepo    *self,
       char *object_path;
       char *dest_path;
 
-      object_path = get_object_path (self, checksum, OSTREE_OBJECT_TYPE_FILE);
+      object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_FILE);
       dest_path = g_build_filename (destination, filename, NULL);
       
       if (priv->archive)
