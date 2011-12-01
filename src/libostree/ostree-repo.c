@@ -31,6 +31,12 @@
 #include <gio/gunixoutputstream.h>
 #include <gio/gunixinputstream.h>
 
+#ifdef HAVE_LIBARCHIVE
+#include <archive.h>
+#include <archive_entry.h>
+#include "ostree-libarchive-input-stream.h"
+#endif
+
 enum {
   PROP_0,
 
@@ -722,6 +728,9 @@ import_directory_meta (OstreeRepo   *self,
   GChecksum *ret_checksum = NULL;
   GVariant *dirmeta = NULL;
 
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return FALSE;
+
   dirmeta = ostree_create_directory_metadata (file_info, xattrs);
   
   if (!import_gvariant_object (self, OSTREE_SERIALIZED_DIRMETA_VARIANT, 
@@ -1301,16 +1310,16 @@ import_directory_recurse (OstreeRepo           *self,
 }
 
 gboolean      
-ostree_repo_commit (OstreeRepo *self,
-                    const char   *branch,
-                    const char   *parent,
-                    const char   *subject,
-                    const char   *body,
-                    GVariant     *metadata,
-                    GFile        *dir,
-                    GChecksum   **out_commit,
-                    GCancellable *cancellable,
-                    GError      **error)
+ostree_repo_commit_directory (OstreeRepo *self,
+                              const char   *branch,
+                              const char   *parent,
+                              const char   *subject,
+                              const char   *body,
+                              GVariant     *metadata,
+                              GFile        *dir,
+                              GChecksum   **out_commit,
+                              GCancellable *cancellable,
+                              GError      **error)
 {
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   gboolean ret = FALSE;
@@ -1346,7 +1355,329 @@ ostree_repo_commit (OstreeRepo *self,
   ot_clear_checksum (&root_metadata_checksum);
   ot_clear_checksum (&root_contents_checksum);
   return ret;
+}
+
+#ifdef HAVE_LIBARCHIVE
+
+static void
+propagate_libarchive_error (GError      **error,
+                            struct archive *a)
+{
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+               "%s", archive_error_string (a));
+}
+
+static GFileInfo *
+file_info_from_archive_entry (struct archive_entry  *entry)
+{
+  GFileInfo *info = g_file_info_new ();
+  guint32 mode;
+  guint32 file_type;
+
+  mode = archive_entry_mode (entry);
+  file_type = ot_gfile_type_for_mode (mode);
+  g_file_info_set_attribute_boolean (info, "standard::is-symlink", S_ISLNK (mode));
+  g_file_info_set_attribute_uint32 (info, "standard::type", file_type);
+  g_file_info_set_attribute_uint32 (info, "unix::uid", archive_entry_uid (entry));
+  g_file_info_set_attribute_uint32 (info, "unix::gid", archive_entry_gid (entry));
+  g_file_info_set_attribute_uint32 (info, "unix::mode", mode);
+
+  if (file_type == G_FILE_TYPE_REGULAR)
+    {
+      g_file_info_set_attribute_uint64 (info, "standard::size", (guint64) archive_entry_size (entry));
+    }
+  else if (file_type == G_FILE_TYPE_SYMBOLIC_LINK)
+    {
+      g_file_info_set_attribute_byte_string (info, "standard::symlink-target", archive_entry_symlink (entry));
+    }
+  else if (file_type == G_FILE_TYPE_SPECIAL)
+    {
+      g_file_info_set_attribute_uint32 (info, "unix::rdev", archive_entry_rdev (entry));
+    }
+
+  return info;
+}
+
+static gboolean
+import_libarchive_entry_file_to_packed (OstreeRepo           *self,
+                                        struct archive       *a,
+                                        struct archive_entry *entry,
+                                        GFileInfo            *file_info,
+                                        GChecksum           **out_checksum,
+                                        GCancellable         *cancellable,
+                                        GError              **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GFile *temp_file = NULL;
+  GInputStream *archive_stream = NULL;
+  GOutputStream *temp_out = NULL;
+  GChecksum *ret_checksum = NULL;
+  gboolean did_exist;
   
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return FALSE;
+
+  if (!ostree_create_temp_regular_file (priv->tmp_dir,
+                                        "archive-tmp-", NULL,
+                                        &temp_file, &temp_out,
+                                        cancellable, error))
+        goto out;
+  
+  if (S_ISREG (g_file_info_get_attribute_uint32 (file_info, "unix::mode")))
+    archive_stream = ostree_libarchive_input_stream_new (a);
+      
+  if (!ostree_pack_file_for_input (temp_out, file_info, archive_stream, 
+                                   NULL, &ret_checksum, cancellable, error))
+    goto out;
+
+  if (!g_output_stream_close (temp_out, cancellable, error))
+    goto out;
+  
+  if (!link_object_trusted (self, temp_file, g_checksum_get_string (ret_checksum),
+                            OSTREE_OBJECT_TYPE_FILE,
+                            FALSE, &did_exist, cancellable, error))
+    goto out;
+
+  ret = TRUE;
+  *out_checksum = ret_checksum;
+  ret_checksum = NULL;
+ out:
+  if (temp_file)
+    (void) unlink (ot_gfile_get_path_cached (temp_file));
+  g_clear_object (&temp_file);
+  g_clear_object (&temp_out);
+  g_clear_object (&archive_stream);
+  ot_clear_checksum (&ret_checksum);
+  return ret;
+}
+
+static gboolean
+import_libarchive_entry_file (OstreeRepo           *self,
+                              struct archive       *a,
+                              struct archive_entry *entry,
+                              GFileInfo            *file_info,
+                              GChecksum           **out_checksum,
+                              GCancellable         *cancellable,
+                              GError              **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GFile *temp_file = NULL;
+  GInputStream *archive_stream = NULL;
+  GChecksum *ret_checksum = NULL;
+  gboolean did_exist;
+  guint32 mode;
+  
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return FALSE;
+
+  mode = g_file_info_get_attribute_uint32 (file_info, "unix::mode");
+  if (S_ISREG (mode))
+    archive_stream = ostree_libarchive_input_stream_new (a);
+  
+  if (!ostree_create_temp_file_from_input (priv->tmp_dir, "file-", NULL,
+                                           file_info, NULL, archive_stream, 
+                                           OSTREE_OBJECT_TYPE_FILE, &temp_file,
+                                           &ret_checksum, cancellable, error))
+    goto out;
+  
+  if (!link_object_trusted (self, temp_file, g_checksum_get_string (ret_checksum),
+                            OSTREE_OBJECT_TYPE_FILE, FALSE, &did_exist,
+                            cancellable, error))
+    goto out;
+
+  ret = TRUE;
+  *out_checksum = ret_checksum;
+  ret_checksum = NULL;
+ out:
+  if (temp_file)
+    (void) unlink (ot_gfile_get_path_cached (temp_file));
+  g_clear_object (&temp_file);
+  g_clear_object (&archive_stream);
+  ot_clear_checksum (&ret_checksum);
+  return ret;
+}
+  
+static gboolean
+import_libarchive (OstreeRepo           *self,
+                   GFile                *archive_f,
+                   GChecksum           **out_contents_checksum,
+                   GChecksum           **out_metadata_checksum,
+                   GCancellable         *cancellable,
+                   GError              **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GChecksum *ret_contents_checksum = NULL;
+  GChecksum *ret_metadata_checksum = NULL;
+  struct archive *a;
+  struct archive_entry *entry;
+  GFileInfo *file_info = NULL;
+  GHashTable *file_checksums = NULL;
+  GHashTable *dir_metadata_checksums = NULL;
+  GHashTable *dir_contents_checksums = NULL;
+  GHashTable *dir_contents = NULL;
+  GChecksum *tmp_checksum = NULL;
+  char *parent_path = NULL;
+
+  a = archive_read_new ();
+  archive_read_support_format_all (a);
+  if (archive_read_open_filename (a, ot_gfile_get_path_cached (archive_f), 8192) != ARCHIVE_OK)
+    {
+      propagate_libarchive_error (error, a);
+      goto out;
+    }
+
+  file_checksums = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  dir_metadata_checksums = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  dir_contents_checksums = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  dir_contents = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
+
+  g_hash_table_insert (dir_contents, g_strdup ("/"), g_ptr_array_new_with_free_func (g_free));
+
+  while (archive_read_next_header (a, &entry) == ARCHIVE_OK)
+    {
+      const char *pathname;
+      guint32 mode;
+      GPtrArray *parent_contents;
+
+      g_clear_object (&file_info);
+      file_info = file_info_from_archive_entry (entry);
+      pathname = archive_entry_pathname (entry); 
+      g_free (parent_path);
+      parent_path = g_path_get_dirname (pathname);
+      if (strcmp (parent_path, ".") == 0)
+        *parent_path = '/';
+
+      parent_contents = g_hash_table_lookup (dir_contents, parent_path);
+      if (!parent_contents)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                       "No such file or directory: %s", parent_path);
+          goto out;
+        }
+
+      mode = archive_entry_mode (entry);
+
+      ot_clear_checksum (&tmp_checksum);
+
+      if (S_ISDIR (mode))
+        {
+          GPtrArray *contents = g_hash_table_lookup (dir_contents, pathname);
+          
+          if (contents)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                           "Directory already exists: %s", pathname);
+              goto out;
+            }
+
+          g_hash_table_insert (dir_contents, g_path_get_basename (pathname),
+                               g_ptr_array_new_with_free_func (g_free));
+
+          if (!import_directory_meta (self, file_info, NULL, &tmp_checksum, cancellable, error))
+            goto out;
+
+          g_hash_table_insert (dir_metadata_checksums,
+                               g_strdup (pathname),
+                               g_strdup (g_checksum_get_string (tmp_checksum)));
+        }
+      else 
+        {
+          if (priv->archive)
+            {
+              if (!import_libarchive_entry_file_to_packed (self, a, entry, file_info, &tmp_checksum, cancellable, error))
+                goto out;
+            }
+          else
+            {
+              if (!import_libarchive_entry_file (self, a, entry, file_info, &tmp_checksum, cancellable, error))
+                goto out;
+            }
+
+          g_hash_table_insert (file_checksums,
+                               g_strdup (pathname),
+                               g_strdup (g_checksum_get_string (tmp_checksum)));
+          g_ptr_array_add (parent_contents, g_path_get_basename (pathname));
+        }
+    }
+  if (archive_read_finish(a) != ARCHIVE_OK)
+    {
+      propagate_libarchive_error (error, a);
+      goto out;
+    }
+
+  ret = TRUE;
+  *out_contents_checksum = ret_contents_checksum;
+  ret_contents_checksum = NULL;
+  *out_metadata_checksum = ret_metadata_checksum;
+  ret_metadata_checksum = NULL;
+ out:
+  g_hash_table_destroy (file_checksums);
+  g_hash_table_destroy (dir_metadata_checksums);
+  g_hash_table_destroy (dir_contents_checksums);
+  g_hash_table_destroy (dir_contents);
+  g_clear_object (&file_info);
+  g_free (parent_path);
+  ot_clear_checksum (&tmp_checksum);
+  return ret;
+}
+#endif
+  
+gboolean      
+ostree_repo_commit_tarfile (OstreeRepo *self,
+                            const char   *branch,
+                            const char   *parent,
+                            const char   *subject,
+                            const char   *body,
+                            GVariant     *metadata,
+                            GFile        *path,
+                            GChecksum   **out_commit,
+                            GCancellable *cancellable,
+                            GError      **error)
+{
+#ifdef HAVE_LIBARCHIVE
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  gboolean ret = FALSE;
+  GChecksum *ret_commit_checksum = NULL;
+  GChecksum *root_metadata_checksum = NULL;
+  GChecksum *root_contents_checksum = NULL;
+  char *current_head = NULL;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+  g_return_val_if_fail (priv->inited, FALSE);
+  g_return_val_if_fail (branch != NULL, FALSE);
+  g_return_val_if_fail (subject != NULL, FALSE);
+  g_return_val_if_fail (metadata == NULL || g_variant_is_of_type (metadata, G_VARIANT_TYPE ("a{sv}")), FALSE);
+
+  if (parent == NULL)
+    parent = branch;
+
+  if (!ostree_repo_resolve_rev (self, parent, TRUE, &current_head, error))
+    goto out;
+
+  if (!import_libarchive (self, path, &root_contents_checksum, &root_metadata_checksum, cancellable, error))
+    goto out;
+
+  if (!import_commit (self, branch, current_head, subject, body, metadata,
+                      root_contents_checksum, root_metadata_checksum, &ret_commit_checksum, error))
+    goto out;
+  
+  ret = TRUE;
+  *out_commit = ret_commit_checksum;
+  ret_commit_checksum = NULL;
+ out:
+  ot_clear_checksum (&ret_commit_checksum);
+  g_free (current_head);
+  ot_clear_checksum (&root_metadata_checksum);
+  ot_clear_checksum (&root_contents_checksum);
+  return ret;
+#else
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+               "This version of ostree is not compiled with libarchive support");
+  return FALSE;
+#endif
 }
 
 static gboolean
