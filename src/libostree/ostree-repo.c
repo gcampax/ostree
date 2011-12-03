@@ -1488,8 +1488,7 @@ import_libarchive_entry_file (OstreeRepo           *self,
     goto out;
 
   ret = TRUE;
-  *out_checksum = ret_checksum;
-  ret_checksum = NULL;
+  ot_transfer_out_value(out_checksum, ret_checksum);
  out:
   if (temp_file)
     (void) unlink (ot_gfile_get_path_cached (temp_file));
@@ -1498,7 +1497,94 @@ import_libarchive_entry_file (OstreeRepo           *self,
   ot_clear_checksum (&ret_checksum);
   return ret;
 }
-  
+
+static char *
+canonicalize_libarchive_path (const char *pathname)
+{
+  GString *ret = g_string_new ("");
+
+  if (strncmp (pathname, "./", 2) == 0)
+    g_string_append (ret, pathname + 1);
+  else
+    {
+      if (*pathname != '/')
+        g_string_append_c (ret, '/');
+      g_string_append (ret, pathname);
+    }
+
+  if (ret->str[ret->len-1] == '/')
+    g_string_erase (ret, ret->len - 1, 1);
+
+  return g_string_free (ret, FALSE);
+}
+
+typedef struct {
+  char *metadata_checksum;
+  char *contents_checksum;
+
+  GHashTable *file_checksums;
+  GHashTable *subdirs;
+} FileTree;
+
+static void
+file_tree_free (FileTree  *tree)
+{
+  g_free (tree->metadata_checksum);
+  g_free (tree->contents_checksum);
+
+  g_hash_table_destroy (tree->file_checksums);
+  g_hash_table_destroy (tree->subdirs);
+
+  g_free (tree);
+}
+
+static FileTree *
+file_tree_new (void)
+{
+  FileTree *ret = g_new0 (FileTree, 1);
+
+  ret->file_checksums = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                               g_free, g_free);
+  ret->subdirs = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                        g_free, (GDestroyNotify)file_tree_free);
+  return ret;
+}
+
+static gboolean
+file_tree_walk (FileTree     *dir,
+                GPtrArray    *split_path,
+                guint         start,
+                FileTree    **out_parent,
+                GError      **error)
+{
+  if (start >= split_path->len)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                   "No such file or directory: %s",
+                   (char*)split_path->pdata[start]);
+      return FALSE;
+    }
+  else if (start == split_path->len - 1)
+    {
+      *out_parent = dir;
+      return TRUE;
+    }
+  else
+    {
+      FileTree *subdir = g_hash_table_lookup (dir->subdirs, split_path->pdata[start]);
+
+      if (!subdir)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                       "No such file or directory: %s",
+                       (char*)split_path->pdata[start]);
+          return FALSE;
+        }
+
+      return file_tree_walk (subdir, split_path, start + 1, out_parent, error);
+    }
+}
+
 static gboolean
 import_libarchive (OstreeRepo           *self,
                    GFile                *archive_f,
@@ -1508,20 +1594,21 @@ import_libarchive (OstreeRepo           *self,
                    GError              **error)
 {
   gboolean ret = FALSE;
+  int r;
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   GChecksum *ret_contents_checksum = NULL;
   GChecksum *ret_metadata_checksum = NULL;
   struct archive *a;
   struct archive_entry *entry;
   GFileInfo *file_info = NULL;
-  GHashTable *file_checksums = NULL;
-  GHashTable *dir_metadata_checksums = NULL;
-  GHashTable *dir_contents_checksums = NULL;
-  GHashTable *dir_contents = NULL;
+  FileTree *root = NULL;
   GChecksum *tmp_checksum = NULL;
   char *parent_path = NULL;
+  char *canonical_path = NULL;
+  GPtrArray *split_path = NULL;
 
   a = archive_read_new ();
+  archive_read_support_compression_all (a);
   archive_read_support_format_all (a);
   if (archive_read_open_filename (a, ot_gfile_get_path_cached (archive_f), 8192) != ARCHIVE_OK)
     {
@@ -1529,59 +1616,69 @@ import_libarchive (OstreeRepo           *self,
       goto out;
     }
 
-  file_checksums = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
-  dir_metadata_checksums = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
-  dir_contents_checksums = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
-  dir_contents = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
-
-  g_hash_table_insert (dir_contents, g_strdup ("/"), g_ptr_array_new_with_free_func (g_free));
-
-  while (archive_read_next_header (a, &entry) == ARCHIVE_OK)
+  while (TRUE)
     {
       const char *pathname;
+      const char *basename;
       guint32 mode;
-      GPtrArray *parent_contents;
+      FileTree *parent;
 
-      g_clear_object (&file_info);
-      file_info = file_info_from_archive_entry (entry);
-      pathname = archive_entry_pathname (entry); 
-      g_free (parent_path);
-      parent_path = g_path_get_dirname (pathname);
-      if (strcmp (parent_path, ".") == 0)
-        *parent_path = '/';
-
-      parent_contents = g_hash_table_lookup (dir_contents, parent_path);
-      if (!parent_contents)
+      r = archive_read_next_header (a, &entry);
+      if (r == ARCHIVE_EOF)
+        break;
+      else if (r != ARCHIVE_OK)
         {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                       "No such file or directory: %s", parent_path);
+          propagate_libarchive_error (error, a);
           goto out;
         }
 
+      pathname = archive_entry_pathname (entry); 
+      g_free (canonical_path);
+      canonical_path = canonicalize_libarchive_path (pathname);
+      
+      if (!ot_util_validate_path (canonical_path, error))
+        goto out;
+
+      if (split_path)
+        g_ptr_array_unref (split_path);
+      split_path = ot_util_path_split (canonical_path);
+
+      if (!file_tree_walk (root, split_path, 0, &parent, error))
+        goto out;
+
+      basename = (char*)split_path->pdata[split_path->len-1];
+
       mode = archive_entry_mode (entry);
+
+      if (g_hash_table_lookup (parent->file_checksums, basename))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+                       "Can't replace existing file: %s", canonical_path);
+          goto out;
+        }
+      else if (g_hash_table_lookup (parent->file_checksums, basename))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+                       "Can't replace existing directory: %s", canonical_path);
+          goto out;
+        }
+
+      g_clear_object (&file_info);
+      file_info = file_info_from_archive_entry (entry);
 
       ot_clear_checksum (&tmp_checksum);
 
       if (S_ISDIR (mode))
         {
-          GPtrArray *contents = g_hash_table_lookup (dir_contents, pathname);
-          
-          if (contents)
-            {
-              g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                           "Directory already exists: %s", pathname);
-              goto out;
-            }
-
-          g_hash_table_insert (dir_contents, g_path_get_basename (pathname),
-                               g_ptr_array_new_with_free_func (g_free));
+          FileTree *dir;
 
           if (!import_directory_meta (self, file_info, NULL, &tmp_checksum, cancellable, error))
             goto out;
 
-          g_hash_table_insert (dir_metadata_checksums,
-                               g_strdup (pathname),
-                               g_strdup (g_checksum_get_string (tmp_checksum)));
+          dir = file_tree_new ();
+          dir->metadata_checksum = g_strdup (g_checksum_get_string (tmp_checksum));
+          g_hash_table_insert (parent->subdirs, g_strdup (basename), dir);
+          g_printerr ("imported DIR %s as %s\n", canonical_path, g_checksum_get_string (tmp_checksum));
         }
       else 
         {
@@ -1596,30 +1693,27 @@ import_libarchive (OstreeRepo           *self,
                 goto out;
             }
 
-          g_hash_table_insert (file_checksums,
-                               g_strdup (pathname),
+          g_hash_table_insert (parent->file_checksums,
+                               g_strdup (basename),
                                g_strdup (g_checksum_get_string (tmp_checksum)));
-          g_ptr_array_add (parent_contents, g_path_get_basename (pathname));
+          g_printerr ("imported FILE %s as %s\n", canonical_path, g_checksum_get_string (tmp_checksum));
         }
     }
-  if (archive_read_finish(a) != ARCHIVE_OK)
+  if (archive_read_close (a) != ARCHIVE_OK)
     {
       propagate_libarchive_error (error, a);
       goto out;
     }
 
   ret = TRUE;
-  *out_contents_checksum = ret_contents_checksum;
-  ret_contents_checksum = NULL;
-  *out_metadata_checksum = ret_metadata_checksum;
-  ret_metadata_checksum = NULL;
+  ot_transfer_out_value(out_contents_checksum, ret_contents_checksum);
+  ot_transfer_out_value(out_metadata_checksum, ret_metadata_checksum);
  out:
-  g_hash_table_destroy (file_checksums);
-  g_hash_table_destroy (dir_metadata_checksums);
-  g_hash_table_destroy (dir_contents_checksums);
-  g_hash_table_destroy (dir_contents);
+  if (root)
+    file_tree_free (root);
   g_clear_object (&file_info);
   g_free (parent_path);
+  g_free (canonical_path);
   ot_clear_checksum (&tmp_checksum);
   return ret;
 }

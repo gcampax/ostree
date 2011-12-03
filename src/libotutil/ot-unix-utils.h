@@ -45,6 +45,9 @@ void ot_util_fatal_gerror (GError *error) G_GNUC_NORETURN;
 
 gboolean ot_util_filename_has_dotdot (const char *path);
 
+gboolean ot_util_validate_path (const char *path,
+                                GError    **error);
+
 gboolean ot_util_validate_file_name (const char *name,
                                      GError    **error);
 
