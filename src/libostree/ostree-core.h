@@ -33,13 +33,14 @@ G_BEGIN_DECLS
 
 typedef enum {
   OSTREE_OBJECT_TYPE_RAW_FILE = 1,   /* .raw */
-  OSTREE_OBJECT_TYPE_ARCHIVED_FILE = 2,  /* .archive */
-  OSTREE_OBJECT_TYPE_DIR_TREE = 3,  /* .dirtree */
-  OSTREE_OBJECT_TYPE_DIR_META = 4,  /* .dirmeta */
-  OSTREE_OBJECT_TYPE_COMMIT = 5     /* .commit */
+  OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT = 2,  /* .archive-content */
+  OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META = 3,  /* .archive-meta */
+  OSTREE_OBJECT_TYPE_DIR_TREE = 4,  /* .dirtree */
+  OSTREE_OBJECT_TYPE_DIR_META = 5,  /* .dirmeta */
+  OSTREE_OBJECT_TYPE_COMMIT = 6     /* .commit */
 } OstreeObjectType;
 
-#define OSTREE_OBJECT_TYPE_IS_META(t) (t >= 3 && t <= 5)
+#define OSTREE_OBJECT_TYPE_IS_META(t) (t >= 3 && t <= 6)
 #define OSTREE_OBJECT_TYPE_LAST OSTREE_OBJECT_TYPE_COMMIT
 
 #define OSTREE_SERIALIZED_VARIANT_FORMAT "(uv)"
@@ -84,6 +85,21 @@ typedef enum {
  * s - Root tree metadata
  */
 #define OSTREE_COMMIT_GVARIANT_FORMAT "(ua{sv}ssstss)"
+
+/* Archive file objects:
+ *
+ * metadata variant:
+ * u - Version
+ * a(sv) - metadata (yes I put metadata in your metadata)
+ * u - uid
+ * u - gid
+ * u - mode
+ * u - rdev
+ * s - symlink target
+ * a(ayay) - xattrs
+ * s - content checksum
+ */
+#define OSTREE_ARCHIVED_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(ua{sv}uuuusa(ayay)s)")
 
 gboolean ostree_validate_checksum_string (const char *sha256,
                                           GError    **error);
@@ -135,32 +151,6 @@ gboolean ostree_checksum_file_async_finish (GFile          *f,
 GVariant *ostree_create_directory_metadata (GFileInfo *dir_info,
                                             GVariant  *xattrs);
 
-/* Archived files:
- *
- * guint32 metadata_length [metadata gvariant] [content]
- *
- * metadata variant:
- * u - Version
- * u - uid
- * u - gid
- * u - mode
- * a(ayay) - xattrs
- * t - content length
- *
- * And then following the end of the variant is the content.  If
- * symlink, then this is the target; if device, then device ID as
- * network byte order uint32.
- */
-#define OSTREE_ARCHIVED_FILE_VARIANT_FORMAT "(uuuua(ayay)t)"
-
-gboolean  ostree_archive_file_for_input (GOutputStream     *output,
-                                         GFileInfo         *finfo,
-                                         GInputStream      *input,
-                                         GVariant          *xattrs,
-                                         GChecksum        **out_checksum,
-                                         GCancellable     *cancellable,
-                                         GError          **error);
-
 gboolean ostree_create_file_from_input (GFile          *file,
                                         GFileInfo      *finfo,
                                         GVariant       *xattrs,
@@ -190,18 +180,15 @@ gboolean ostree_create_temp_regular_file (GFile            *dir,
                                           GCancellable     *cancellable,
                                           GError          **error);
 
-gboolean ostree_parse_archived_file (GFile            *file,
-                                     GFileInfo       **out_file_info,
-                                     GVariant        **out_xattrs,
-                                     GInputStream    **out_content,
-                                     GCancellable     *cancellable,
-                                     GError          **error);
+GVariant *ostree_create_archive_file_metadata (GFileInfo   *file_info,
+                                               GVariant    *xattrs,
+                                               const char  *content_checksum);
 
-gboolean ostree_unpack_object (GFile             *file,
-                               OstreeObjectType  objtype,
-                               GFile             *dest,    
-                               GChecksum   **out_checksum,
-                               GError      **error);
+gboolean ostree_parse_archived_file_meta (GVariant         *data,
+                                          GFileInfo       **out_file_info,
+                                          GVariant        **out_xattrs,
+                                          char            **out_content_checksum,
+                                          GError          **error);
 
 
 #endif /* _OSTREE_REPO */

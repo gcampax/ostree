@@ -115,29 +115,43 @@ static gboolean
 store_object (OstreeRepo  *repo,
               SoupSession *soup,
               SoupURI     *baseuri,
-              const char  *object,
+              const char  *checksum,
               OstreeObjectType objtype,
               gboolean    *did_exist,
               GError     **error)
 {
   gboolean ret = FALSE;
+  GFile *f = NULL;
   char *filename = NULL;
   char *objpath = NULL;
   char *relpath = NULL;
   SoupURI *obj_uri = NULL;
+  gboolean exists;
 
   g_assert (objtype != OSTREE_OBJECT_TYPE_RAW_FILE);
 
-  objpath = ostree_get_relative_object_path (object, objtype);
-  obj_uri = soup_uri_copy (baseuri);
-  relpath = g_build_filename (soup_uri_get_path (obj_uri), objpath, NULL);
-  soup_uri_set_path (obj_uri, relpath);
-
-  if (!fetch_uri (repo, soup, obj_uri, &filename, error))
+  if (!ostree_repo_has_object (repo, objtype, checksum, &exists, NULL, error))
     goto out;
 
-  if (!ostree_repo_store_archived_file (repo, object, filename, objtype, did_exist, error))
-    goto out;
+  if (!exists)
+    {
+      objpath = ostree_get_relative_object_path (checksum, objtype);
+      obj_uri = soup_uri_copy (baseuri);
+      relpath = g_build_filename (soup_uri_get_path (obj_uri), objpath, NULL);
+      soup_uri_set_path (obj_uri, relpath);
+
+      if (!fetch_uri (repo, soup, obj_uri, &filename, error))
+        goto out;
+      
+      ot_gfile_new_for_path (filename);
+  
+      if (!ostree_repo_store_object (repo, objtype, checksum, NULL, error))
+        goto out;
+
+      *did_exist = FALSE;
+    }
+  else
+    *did_exist = TRUE;
 
   ret = TRUE;
  out:
@@ -145,6 +159,7 @@ store_object (OstreeRepo  *repo,
     soup_uri_free (obj_uri);
   if (filename)
     (void) unlink (filename);
+  g_clear_object (&f);
   g_free (filename);
   g_free (objpath);
   g_free (relpath);
