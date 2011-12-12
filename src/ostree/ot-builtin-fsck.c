@@ -35,6 +35,7 @@ static GOptionEntry options[] = {
 };
 
 typedef struct {
+  OstreeRepo *repo;
   guint n_objects;
   gboolean had_error;
 } OtFsckData;
@@ -48,13 +49,25 @@ checksum_archived_file (OtFsckData   *data,
   gboolean ret = FALSE;
   GChecksum *ret_checksum = NULL;
   GInputStream *in = NULL;
+  GVariant *archive_metadata = NULL;
   GVariant *xattrs = NULL;
+  char *content_checksum = NULL;
+  GFile *content_path = NULL;
+  GInputStream *content_input = NULL;
   GFileInfo *file_info = NULL;
   char buf[8192];
   gsize bytes_read;
   guint32 mode;
 
-  if (!ostree_parse_archived_file (file, &file_info, &xattrs, &in, NULL, error))
+  if (!ot_util_variant_map (file, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT, &archive_metadata, error))
+    goto out;
+
+  if (!ostree_parse_archived_file_meta (archive_metadata, &file_info, &xattrs, &content_checksum, error))
+    goto out;
+
+  content_path = ostree_repo_get_object_path (data->repo, content_checksum, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
+  content_input = (GInputStream*)g_file_read (content_path, NULL, error);
+  if (!content_input)
     goto out;
 
   ret_checksum = g_checksum_new (G_CHECKSUM_SHA256);
@@ -100,6 +113,10 @@ checksum_archived_file (OtFsckData   *data,
   g_clear_object (&in);
   g_clear_object (&file_info);
   ot_clear_gvariant (&xattrs);
+  ot_clear_gvariant (&archive_metadata);
+  g_free (content_checksum);
+  g_clear_object (&content_path);
+  g_clear_object (&content_input);
   return ret;
 }
 
@@ -173,12 +190,13 @@ ostree_builtin_fsck (int argc, char **argv, const char *repo_path, GError **erro
   if (!g_option_context_parse (context, &argc, &argv, error))
     goto out;
 
-  data.n_objects = 0;
-  data.had_error = FALSE;
-
   repo = ostree_repo_new (repo_path);
   if (!ostree_repo_check (repo, error))
     goto out;
+
+  data.repo = repo;
+  data.n_objects = 0;
+  data.had_error = FALSE;
 
   if (!ostree_repo_iter_objects (repo, object_iter_callback, &data, error))
     goto out;

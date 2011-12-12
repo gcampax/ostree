@@ -499,8 +499,11 @@ ostree_get_relative_object_path (const char *checksum,
     case OSTREE_OBJECT_TYPE_RAW_FILE:
       type_string = ".file";
       break;
-    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE:
-      type_string = ".archive";
+    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT:
+      type_string = ".archive-content";
+      break;
+    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META:
+      type_string = ".archive-meta";
       break;
     case OSTREE_OBJECT_TYPE_DIR_TREE:
       type_string = ".dirtree";
@@ -524,7 +527,6 @@ ostree_create_archive_file_metadata (GFileInfo         *finfo,
                                      const char        *content_checksum)
 {
   guint32 uid, gid, mode, rdev;
-  guint64 object_size;
   GVariantBuilder pack_builder;
 
   uid = g_file_info_get_attribute_uint32 (finfo, G_FILE_ATTRIBUTE_UNIX_UID);
@@ -532,10 +534,10 @@ ostree_create_archive_file_metadata (GFileInfo         *finfo,
   mode = g_file_info_get_attribute_uint32 (finfo, G_FILE_ATTRIBUTE_UNIX_MODE);
   rdev = g_file_info_get_attribute_uint32 (finfo, G_FILE_ATTRIBUTE_UNIX_RDEV);
 
-  g_variant_builder_init (&pack_builder, G_VARIANT_TYPE (OSTREE_ARCHIVED_FILE_VARIANT_FORMAT));
+  g_variant_builder_init (&pack_builder, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT);
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (0));   /* Version */ 
   /* If you later add actual metadata here, don't forget to byteswap it to Big Endian if necessary */
-  g_variant_builder_add (&pack_builder, "@a{sv}", g_variant_new_array (G_VARIANT_TYPE ("{sv}", NULL, 0)));
+  g_variant_builder_add (&pack_builder, "@a{sv}", g_variant_new_array (G_VARIANT_TYPE ("{sv}"), NULL, 0));
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (uid));
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (gid));
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (mode));
@@ -563,15 +565,13 @@ ostree_parse_archived_file_meta (GVariant         *metadata,
   GFileInfo *ret_file_info = NULL;
   GVariant *metametadata = NULL;
   GVariant *ret_xattrs = NULL;
-  guint32 metadata_len;
   guint32 version, uid, gid, mode, rdev;
-  gsize bytes_read;
   const char *symlink_target;
   char *ret_content_checksum;
 
   g_variant_get (metadata, "(u@a{sv}uuuu&s@a(ayay)s)",
                  &version, &metametadata, &uid, &gid, &mode, &rdev,
-                 &ret_xattrs, &ret_content_checksum);
+                 &symlink_target, &ret_xattrs, &ret_content_checksum);
   uid = GUINT32_FROM_BE (uid);
   gid = GUINT32_FROM_BE (gid);
   mode = GUINT32_FROM_BE (mode);

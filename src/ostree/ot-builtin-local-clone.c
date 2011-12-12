@@ -95,29 +95,28 @@ object_iter_callback (OstreeRepo   *repo,
 {
   OtLocalCloneData *data = user_data;
   GError *error = NULL;
-  gboolean did_exist;
+  GVariant *xattrs = NULL;
+  GInputStream *input = NULL;
 
-  if (ostree_repo_get_mode (data->src_repo) == OSTREE_REPO_MODE_ARCHIVE)
+  if (objtype == OSTREE_OBJECT_TYPE_RAW_FILE)
+    xattrs = ostree_get_xattrs_for_file (objfile, &error);
+  
+  if (objtype == OSTREE_OBJECT_TYPE_RAW_FILE
+      || objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT)
     {
-      if (!ostree_repo_store_archived_file (data->dest_repo, checksum,
-                                            ot_gfile_get_path_cached (objfile),
-                                            objtype,
-                                            &did_exist,
-                                            &error))
+      input = (GInputStream*)g_file_read (objfile, NULL, &error);
+      if (!input)
         goto out;
     }
-  else
-    {
-      if (!ostree_repo_store_object_trusted (data->dest_repo,
-                                             objfile, 
-                                             checksum,
-                                             objtype,
-                                             NULL,
-                                             &error))
-        goto out;
-    }
+
+  if (!ostree_repo_store_object_trusted (data->dest_repo, objtype, checksum,
+                                         file_info, xattrs, input,
+                                         NULL, &error))
+    goto out;
 
  out:
+  ot_clear_gvariant (&xattrs);
+  g_clear_object (&input);
   if (error != NULL)
     {
       g_printerr ("%s\n", error->message);

@@ -126,6 +126,8 @@ store_object (OstreeRepo  *repo,
   char *objpath = NULL;
   char *relpath = NULL;
   SoupURI *obj_uri = NULL;
+  GFileInfo *file_info = NULL;
+  GInputStream *input = NULL;
   gboolean exists;
 
   g_assert (objtype != OSTREE_OBJECT_TYPE_RAW_FILE);
@@ -143,9 +145,18 @@ store_object (OstreeRepo  *repo,
       if (!fetch_uri (repo, soup, obj_uri, &filename, error))
         goto out;
       
-      ot_gfile_new_for_path (filename);
+      f = ot_gfile_new_for_path (filename);
+
+      file_info = g_file_query_info (f, OSTREE_GIO_FAST_QUERYINFO,
+                                     G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, error);
+      if (!file_info)
+        goto out;
+
+      input = (GInputStream*)g_file_read (f, NULL, error);
+      if (!input)
+        goto out;
   
-      if (!ostree_repo_store_object (repo, objtype, checksum, NULL, error))
+      if (!ostree_repo_store_object (repo, objtype, checksum, file_info, NULL, input, NULL, error))
         goto out;
 
       *did_exist = FALSE;
@@ -160,6 +171,8 @@ store_object (OstreeRepo  *repo,
   if (filename)
     (void) unlink (filename);
   g_clear_object (&f);
+  g_clear_object (&file_info);
+  g_clear_object (&input);
   g_free (filename);
   g_free (objpath);
   g_free (relpath);
@@ -202,7 +215,10 @@ store_tree_recurse (OstreeRepo   *repo,
 
           g_variant_get_child (files_variant, i, "(&s&s)", &filename, &checksum);
 
-          if (!store_object (repo, soup, base_uri, checksum, OSTREE_OBJECT_TYPE_ARCHIVED_FILE, &did_exist, error))
+          if (!store_object (repo, soup, base_uri, checksum,
+                             OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META,
+                             &did_exist,
+                             error))
             goto out;
         }
       

@@ -90,6 +90,7 @@ gboolean      ostree_repo_commit_transaction (OstreeRepo     *self,
 gboolean      ostree_repo_has_object (OstreeRepo           *self,
                                       OstreeObjectType      objtype,
                                       const char           *checksum,
+                                      gboolean             *out_have_object,
                                       GCancellable         *cancellable,
                                       GError             **error);
 
@@ -99,7 +100,7 @@ gboolean      ostree_repo_store_object (OstreeRepo       *self,
                                         GFileInfo        *file_info,
                                         GVariant         *xattrs,
                                         GInputStream     *content,
-                                        GCancellable *cancellable,
+                                        GCancellable     *cancellable,
                                         GError          **error);
 
 gboolean      ostree_repo_store_object_trusted (OstreeRepo   *self,
