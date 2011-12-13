@@ -118,7 +118,7 @@ gboolean ostree_set_xattrs (GFile *f, GVariant *xattrs,
                             GCancellable *cancellable, GError **error);
 
 gboolean ostree_parse_metadata_file (GFile                       *file,
-                                     OstreeObjectType            *out_type,
+                                     OstreeObjectType             expected_type,
                                      GVariant                   **out_variant,
                                      GError                     **error);
 

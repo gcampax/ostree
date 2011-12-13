@@ -59,7 +59,7 @@ checksum_archived_file (OtFsckData   *data,
   gsize bytes_read;
   guint32 mode;
 
-  if (!ot_util_variant_map (file, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT, &archive_metadata, error))
+  if (!ostree_parse_metadata_file (file, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META, &archive_metadata, error))
     goto out;
 
   if (!ostree_parse_archived_file_meta (archive_metadata, &file_info, &xattrs, &content_checksum, error))

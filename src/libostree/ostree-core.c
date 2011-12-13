@@ -445,34 +445,40 @@ ostree_set_xattrs (GFile  *f,
 
 gboolean
 ostree_parse_metadata_file (GFile                       *file,
-                            OstreeObjectType            *out_type,
+                            OstreeObjectType             expected_type,
                             GVariant                   **out_variant,
                             GError                     **error)
 {
   gboolean ret = FALSE;
   GVariant *ret_variant = NULL;
   GVariant *container = NULL;
-  guint32 ret_type;
+  guint32 actual_type;
 
   if (!ot_util_variant_map (file, G_VARIANT_TYPE (OSTREE_SERIALIZED_VARIANT_FORMAT),
                             &container, error))
     goto out;
 
   g_variant_get (container, "(uv)",
-                 &ret_type, &ret_variant);
-  ret_type = GUINT32_FROM_BE (ret_type);
-  if (!OSTREE_OBJECT_TYPE_IS_META (ret_type))
+                 &actual_type, &ret_variant);
+  ot_util_variant_take_ref (ret_variant);
+  actual_type = GUINT32_FROM_BE (actual_type);
+  if (!OSTREE_OBJECT_TYPE_IS_META (actual_type))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Corrupted metadata object '%s'; invalid type %d",
-                   ot_gfile_get_path_cached (file), ret_type);
+                   ot_gfile_get_path_cached (file), actual_type);
       goto out;
     }
-  ot_util_variant_take_ref (ret_variant);
+  if (actual_type != expected_type)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted metadata object '%s'; found type %u, expected %u",
+                   ot_gfile_get_path_cached (file), 
+                   actual_type, (guint32)expected_type);
+      goto out;
+    }
 
   ret = TRUE;
-  if (out_type)
-    *out_type = ret_type;
   ot_transfer_out_value(out_variant, &ret_variant);
  out:
   ot_clear_gvariant (&ret_variant);
@@ -528,6 +534,7 @@ ostree_create_archive_file_metadata (GFileInfo         *finfo,
 {
   guint32 uid, gid, mode, rdev;
   GVariantBuilder pack_builder;
+  GVariant *ret = NULL;
 
   uid = g_file_info_get_attribute_uint32 (finfo, G_FILE_ATTRIBUTE_UNIX_UID);
   gid = g_file_info_get_attribute_uint32 (finfo, G_FILE_ATTRIBUTE_UNIX_GID);
@@ -551,7 +558,10 @@ ostree_create_archive_file_metadata (GFileInfo         *finfo,
 
   g_variant_builder_add (&pack_builder, "s", content_checksum);
 
-  return g_variant_builder_end (&pack_builder);
+  ret = g_variant_builder_end (&pack_builder);
+  g_variant_ref_sink (ret);
+  
+  return ret;
 }
 
 gboolean
@@ -572,13 +582,25 @@ ostree_parse_archived_file_meta (GVariant         *metadata,
   g_variant_get (metadata, "(u@a{sv}uuuu&s@a(ayay)s)",
                  &version, &metametadata, &uid, &gid, &mode, &rdev,
                  &symlink_target, &ret_xattrs, &ret_content_checksum);
+  version = GUINT32_FROM_BE (version);
+
+  if (version != 0)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid version %d in archived file metadata", version);
+      goto out;
+    }
+
   uid = GUINT32_FROM_BE (uid);
   gid = GUINT32_FROM_BE (gid);
   mode = GUINT32_FROM_BE (mode);
   rdev = GUINT32_FROM_BE (rdev);
 
   if (!ostree_validate_checksum_string (ret_content_checksum, error))
-    goto out;
+    {
+      g_prefix_error (error, "While parsing archived file metadata: ");
+      goto out;
+    }
 
   ret_file_info = g_file_info_new ();
   g_file_info_set_attribute_uint32 (ret_file_info, "standard::type", ot_gfile_type_for_mode (mode));

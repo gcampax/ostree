@@ -319,8 +319,8 @@ _ostree_repo_file_get_xattrs (OstreeRepoFile  *self,
     {
       local_file = _ostree_repo_file_nontree_get_local (self);
       
-      if (!ot_util_variant_map (local_file, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT,
-                                &metadata, error))
+      if (!ostree_parse_metadata_file (local_file, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META,
+                                       &metadata, error))
         goto out;
 
       if (!ostree_parse_archived_file_meta (metadata, NULL, &ret_xattrs, NULL, error))
@@ -1038,8 +1038,8 @@ _ostree_repo_file_tree_query_child (OstreeRepoFile  *self,
 
       if (ostree_repo_get_mode (self->repo) == OSTREE_REPO_MODE_ARCHIVE)
 	{
-          if (!ot_util_variant_map (local_child, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT,
-                                    &archive_metadata, error))
+          if (!ostree_parse_metadata_file (local_child, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META,
+                                           &archive_metadata, error))
             goto out;
           if (!ostree_parse_archived_file_meta (archive_metadata, &ret_info, NULL, NULL, error))
             goto out;

@@ -37,7 +37,7 @@
 #include "ostree-libarchive-input-stream.h"
 #endif
 
-#define PENDING_TRANSACTION_OBJECT_GVARIANT_FORMAT (G_VARIANT_TYPE("(uss)"))
+#define PENDING_TRANSACTION_OBJECT_GVARIANT_FORMAT (G_VARIANT_TYPE("(us)"))
 
 enum {
   PROP_0,
@@ -802,6 +802,7 @@ impl_stage_raw_file_object_from_archive (OstreeRepo         *self,
   GVariant *archived_xattrs = NULL;
   char *archived_content_checksum = NULL;
   GVariant *archived_content = NULL; /* const */
+  guint32 pending_objtype;
   const char *archived_content_path;
   GFile *archived_content_file = NULL;
   GInputStream *archived_content_input = NULL;
@@ -829,7 +830,8 @@ impl_stage_raw_file_object_from_archive (OstreeRepo         *self,
       goto out;
     }
 
-  g_variant_get (archived_content, "(u&s)", &archived_content_path);
+  g_variant_get (archived_content, "(u&s)", &pending_objtype, &archived_content_path);
+  g_assert (pending_objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
 
   archived_content_file = g_file_get_child (priv->tmp_dir, archived_content_path);
   archived_content_input = (GInputStream*)g_file_read (archived_content_file, cancellable, error);
@@ -944,7 +946,7 @@ stage_object (OstreeRepo         *self,
           else
             {
               actual_checksum = g_checksum_get_string (ret_checksum);
-              if (strcmp (actual_checksum, expected_checksum) != 0)
+              if (expected_checksum && strcmp (actual_checksum, expected_checksum) != 0)
                 {
                   g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                                "Corrupted object %s (actual checksum is %s)",
@@ -1045,7 +1047,7 @@ ostree_repo_commit_transaction (OstreeRepo     *self,
       guint32 objtype;
       const char *filename;
 
-      g_variant_get (data, "(u&s&s)", &objtype, &filename, &checksum);
+      g_variant_get (data, "(u&s)", &objtype, &filename);
 
       g_clear_object (&f);
       f = g_file_get_child (priv->tmp_dir, filename);
@@ -1101,7 +1103,6 @@ ostree_repo_load_variant (OstreeRepo  *self,
                           GError       **error)
 {
   gboolean ret = FALSE;
-  OstreeObjectType type;
   GFile *object_path = NULL;
   GVariant *ret_variant = NULL;
 
@@ -1109,16 +1110,8 @@ ostree_repo_load_variant (OstreeRepo  *self,
 
   object_path = ostree_repo_get_object_path (self, sha256, expected_type);
 
-  if (!ostree_parse_metadata_file (object_path, &type, &ret_variant, error))
+  if (!ostree_parse_metadata_file (object_path, expected_type, &ret_variant, error))
     goto out;
-
-  if (type != expected_type)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted metadata object '%s'; found type %u, expected %u", sha256,
-                   type, (guint32)expected_type);
-      goto out;
-    }
 
   ret = TRUE;
   ot_transfer_out_value(out_variant, &ret_variant);
@@ -1467,7 +1460,7 @@ stage_directory_recurse (OstreeRepo           *self,
           if (!xattrs)
             goto out;
 
-          if (!stage_object (self, get_objtype_for_repo_file (self),
+          if (!stage_object (self, OSTREE_OBJECT_TYPE_RAW_FILE,
                              child_info, xattrs, file_input, NULL,
                              &child_file_checksum, cancellable, error))
             goto out;
@@ -1629,7 +1622,7 @@ import_libarchive_entry_file (OstreeRepo           *self,
   if (g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
     archive_stream = ostree_libarchive_input_stream_new (a);
   
-  if (!stage_object (self, get_objtype_for_repo_file (self),
+  if (!stage_object (self, OSTREE_OBJECT_TYPE_RAW_FILE,
                      file_info, NULL, archive_stream,
                      NULL, &ret_checksum,
                      cancellable, error))
@@ -2299,7 +2292,7 @@ checkout_tree (OstreeRepo               *self,
 
           if (priv->mode == OSTREE_REPO_MODE_ARCHIVE)
             {
-              if (!ot_util_variant_map (object_path, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT, &archive_metadata, error))
+              if (!ostree_parse_metadata_file (object_path, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META, &archive_metadata, error))
                 goto out;
               
               g_free (archive_content_checksum);
