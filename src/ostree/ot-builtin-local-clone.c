@@ -25,7 +25,8 @@
 #include "ot-builtins.h"
 #include "ostree.h"
 
-#include <glib/gi18n.h>
+#include <unistd.h>
+#include <stdlib.h>
 
 static GOptionEntry options[] = {
   { NULL }
@@ -101,8 +102,10 @@ object_iter_callback (OstreeRepo   *repo,
   if (objtype == OSTREE_OBJECT_TYPE_RAW_FILE)
     xattrs = ostree_get_xattrs_for_file (objfile, &error);
   
-  if (objtype == OSTREE_OBJECT_TYPE_RAW_FILE
-      || objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT)
+  if (((objtype == OSTREE_OBJECT_TYPE_RAW_FILE
+        || objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT)
+       && g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
+      || OSTREE_OBJECT_TYPE_IS_META (objtype))
     {
       input = (GInputStream*)g_file_read (objfile, NULL, &error);
       if (!input)
@@ -121,6 +124,7 @@ object_iter_callback (OstreeRepo   *repo,
     {
       g_printerr ("%s\n", error->message);
       g_clear_error (&error);
+      exit (1);
     }
 }
 
@@ -182,7 +186,13 @@ ostree_builtin_local_clone (int argc, char **argv, const char *repo_path, GError
 
   data.uids_differ = g_file_info_get_attribute_uint32 (src_info, "unix::uid") != g_file_info_get_attribute_uint32 (dest_info, "unix::uid");
 
+  if (!ostree_repo_prepare_transaction (data.dest_repo, NULL, error))
+    goto out;
+
   if (!ostree_repo_iter_objects (data.src_repo, object_iter_callback, &data, error))
+    goto out;
+
+  if (!ostree_repo_commit_transaction (data.dest_repo, NULL, error))
     goto out;
   
   src_dir = g_file_resolve_relative_path (src_repo_dir, "refs/heads");

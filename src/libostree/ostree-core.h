@@ -43,7 +43,7 @@ typedef enum {
 #define OSTREE_OBJECT_TYPE_IS_META(t) (t >= 3 && t <= 6)
 #define OSTREE_OBJECT_TYPE_LAST OSTREE_OBJECT_TYPE_COMMIT
 
-#define OSTREE_SERIALIZED_VARIANT_FORMAT "(uv)"
+#define OSTREE_SERIALIZED_VARIANT_FORMAT G_VARIANT_TYPE("(uv)")
 
 /*
  * xattr objects:
@@ -87,24 +87,24 @@ typedef enum {
 #define OSTREE_COMMIT_GVARIANT_FORMAT "(ua{sv}ssstss)"
 
 /* Archive file objects:
- *
- * metadata variant:
  * u - Version
- * a(sv) - metadata (yes I put metadata in your metadata)
  * u - uid
  * u - gid
  * u - mode
  * u - rdev
  * s - symlink target
  * a(ayay) - xattrs
- * s - content checksum
  */
-#define OSTREE_ARCHIVED_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(ua{sv}uuuusa(ayay)s)")
+#define OSTREE_ARCHIVED_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(uuuuusa(ayay))")
 
 gboolean ostree_validate_checksum_string (const char *sha256,
                                           GError    **error);
 
 void ostree_checksum_update_stat (GChecksum *checksum, guint32 uid, guint32 gid, guint32 mode);
+
+const char * ostree_object_type_to_string (OstreeObjectType objtype);
+
+OstreeObjectType ostree_object_type_from_string (const char *str);
 
 char *ostree_get_relative_object_path (const char        *checksum,
                                        OstreeObjectType   type);
@@ -181,13 +181,11 @@ gboolean ostree_create_temp_regular_file (GFile            *dir,
                                           GError          **error);
 
 GVariant *ostree_create_archive_file_metadata (GFileInfo   *file_info,
-                                               GVariant    *xattrs,
-                                               const char  *content_checksum);
+                                               GVariant    *xattrs);
 
 gboolean ostree_parse_archived_file_meta (GVariant         *data,
                                           GFileInfo       **out_file_info,
                                           GVariant        **out_xattrs,
-                                          char            **out_content_checksum,
                                           GError          **error);
 
 

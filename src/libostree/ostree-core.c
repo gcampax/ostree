@@ -245,13 +245,16 @@ ostree_checksum_file_from_input (GFileInfo        *file_info,
       goto out;
     }
 
-  ostree_checksum_update_stat (ret_checksum,
-                               g_file_info_get_attribute_uint32 (file_info, "unix::uid"),
-                               g_file_info_get_attribute_uint32 (file_info, "unix::gid"),
-                               g_file_info_get_attribute_uint32 (file_info, "unix::mode"));
-  /* FIXME - ensure empty xattrs are the same as NULL xattrs */
-  if (xattrs)
-    g_checksum_update (ret_checksum, (guint8*)g_variant_get_data (xattrs), g_variant_get_size (xattrs));
+  if (objtype != OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT)
+    {
+      ostree_checksum_update_stat (ret_checksum,
+                                   g_file_info_get_attribute_uint32 (file_info, "unix::uid"),
+                                   g_file_info_get_attribute_uint32 (file_info, "unix::gid"),
+                                   g_file_info_get_attribute_uint32 (file_info, "unix::mode"));
+      /* FIXME - ensure empty xattrs are the same as NULL xattrs */
+      if (xattrs)
+        g_checksum_update (ret_checksum, (guint8*)g_variant_get_data (xattrs), g_variant_get_size (xattrs));
+    }
 
   ret = TRUE;
   ot_transfer_out_value (out_checksum, &ret_checksum);
@@ -291,7 +294,7 @@ ostree_checksum_file (GFile            *f,
         goto out;
     }
 
-  if (!OSTREE_OBJECT_TYPE_IS_META(objtype))
+  if (objtype == OSTREE_OBJECT_TYPE_RAW_FILE)
     {
       xattrs = ostree_get_xattrs_for_file (f, error);
       if (!xattrs)
@@ -454,7 +457,7 @@ ostree_parse_metadata_file (GFile                       *file,
   GVariant *container = NULL;
   guint32 actual_type;
 
-  if (!ot_util_variant_map (file, G_VARIANT_TYPE (OSTREE_SERIALIZED_VARIANT_FORMAT),
+  if (!ot_util_variant_map (file, OSTREE_SERIALIZED_VARIANT_FORMAT,
                             &container, error))
     goto out;
 
@@ -486,12 +489,53 @@ ostree_parse_metadata_file (GFile                       *file,
   return ret;
 }
 
+const char *
+ostree_object_type_to_string (OstreeObjectType objtype)
+{
+  switch (objtype)
+    {
+    case OSTREE_OBJECT_TYPE_RAW_FILE:
+      return "file";
+    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT:
+      return "archive-content";
+    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META:
+      return "archive-meta";
+    case OSTREE_OBJECT_TYPE_DIR_TREE:
+      return "dirtree";
+    case OSTREE_OBJECT_TYPE_DIR_META:
+      return "dirmeta";
+    case OSTREE_OBJECT_TYPE_COMMIT:
+      return "commit";
+    default:
+      g_assert_not_reached ();
+      return NULL;
+    }
+}
+
+OstreeObjectType
+ostree_object_type_from_string (const char *str)
+{
+  if (!strcmp (str, "file"))
+    return OSTREE_OBJECT_TYPE_RAW_FILE;
+  else if (!strcmp (str, "archive-content"))
+    return OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT;
+  else if (!strcmp (str, "archive-meta"))
+    return OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META;
+  else if (!strcmp (str, "dirtree"))
+    return OSTREE_OBJECT_TYPE_DIR_TREE;
+  else if (!strcmp (str, "dirmeta"))
+    return OSTREE_OBJECT_TYPE_DIR_META;
+  else if (!strcmp (str, "commit"))
+    return OSTREE_OBJECT_TYPE_COMMIT;
+  g_assert_not_reached ();
+  return 0;
+}
+
 char *
 ostree_get_relative_object_path (const char *checksum,
                                  OstreeObjectType type)
 {
   GString *path;
-  const char *type_string;
 
   g_assert (strlen (checksum) == 64);
 
@@ -500,37 +544,15 @@ ostree_get_relative_object_path (const char *checksum,
   g_string_append_len (path, checksum, 2);
   g_string_append_c (path, '/');
   g_string_append (path, checksum + 2);
-  switch (type)
-    {
-    case OSTREE_OBJECT_TYPE_RAW_FILE:
-      type_string = ".file";
-      break;
-    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT:
-      type_string = ".archive-content";
-      break;
-    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META:
-      type_string = ".archive-meta";
-      break;
-    case OSTREE_OBJECT_TYPE_DIR_TREE:
-      type_string = ".dirtree";
-      break;
-    case OSTREE_OBJECT_TYPE_DIR_META:
-      type_string = ".dirmeta";
-      break;
-    case OSTREE_OBJECT_TYPE_COMMIT:
-      type_string = ".commit";
-      break;
-    default:
-      g_assert_not_reached ();
-    }
-  g_string_append (path, type_string);
+  g_string_append_c (path, '.');
+  g_string_append (path, ostree_object_type_to_string (type));
+
   return g_string_free (path, FALSE);
 }
 
 GVariant *
 ostree_create_archive_file_metadata (GFileInfo         *finfo,
-                                     GVariant          *xattrs,
-                                     const char        *content_checksum)
+                                     GVariant          *xattrs)
 {
   guint32 uid, gid, mode, rdev;
   GVariantBuilder pack_builder;
@@ -543,8 +565,6 @@ ostree_create_archive_file_metadata (GFileInfo         *finfo,
 
   g_variant_builder_init (&pack_builder, OSTREE_ARCHIVED_FILE_VARIANT_FORMAT);
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (0));   /* Version */ 
-  /* If you later add actual metadata here, don't forget to byteswap it to Big Endian if necessary */
-  g_variant_builder_add (&pack_builder, "@a{sv}", g_variant_new_array (G_VARIANT_TYPE ("{sv}"), NULL, 0));
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (uid));
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (gid));
   g_variant_builder_add (&pack_builder, "u", GUINT32_TO_BE (mode));
@@ -556,8 +576,6 @@ ostree_create_archive_file_metadata (GFileInfo         *finfo,
 
   g_variant_builder_add (&pack_builder, "@a(ayay)", xattrs ? xattrs : g_variant_new_array (G_VARIANT_TYPE ("(ayay)"), NULL, 0));
 
-  g_variant_builder_add (&pack_builder, "s", content_checksum);
-
   ret = g_variant_builder_end (&pack_builder);
   g_variant_ref_sink (ret);
   
@@ -568,20 +586,17 @@ gboolean
 ostree_parse_archived_file_meta (GVariant         *metadata,
                                  GFileInfo       **out_file_info,
                                  GVariant        **out_xattrs,
-                                 char            **out_content_checksum,
                                  GError          **error)
 {
   gboolean ret = FALSE;
   GFileInfo *ret_file_info = NULL;
-  GVariant *metametadata = NULL;
   GVariant *ret_xattrs = NULL;
   guint32 version, uid, gid, mode, rdev;
   const char *symlink_target;
-  char *ret_content_checksum;
 
-  g_variant_get (metadata, "(u@a{sv}uuuu&s@a(ayay)s)",
-                 &version, &metametadata, &uid, &gid, &mode, &rdev,
-                 &symlink_target, &ret_xattrs, &ret_content_checksum);
+  g_variant_get (metadata, "(uuuuu&s@a(ayay))",
+                 &version, &uid, &gid, &mode, &rdev,
+                 &symlink_target, &ret_xattrs);
   version = GUINT32_FROM_BE (version);
 
   if (version != 0)
@@ -595,12 +610,6 @@ ostree_parse_archived_file_meta (GVariant         *metadata,
   gid = GUINT32_FROM_BE (gid);
   mode = GUINT32_FROM_BE (mode);
   rdev = GUINT32_FROM_BE (rdev);
-
-  if (!ostree_validate_checksum_string (ret_content_checksum, error))
-    {
-      g_prefix_error (error, "While parsing archived file metadata: ");
-      goto out;
-    }
 
   ret_file_info = g_file_info_new ();
   g_file_info_set_attribute_uint32 (ret_file_info, "standard::type", ot_gfile_type_for_mode (mode));
@@ -635,12 +644,9 @@ ostree_parse_archived_file_meta (GVariant         *metadata,
   ret = TRUE;
   ot_transfer_out_value(out_file_info, &ret_file_info);
   ot_transfer_out_value(out_xattrs, &ret_xattrs);
-  ot_transfer_out_value(out_content_checksum, &ret_content_checksum);
  out:
   g_clear_object (&ret_file_info);
   ot_clear_gvariant (&ret_xattrs);
-  ot_clear_gvariant (&metametadata);
-  g_free (ret_content_checksum);
   return ret;
 }
 
@@ -659,7 +665,11 @@ ostree_create_file_from_input (GFile            *dest_file,
   GFileOutputStream *out = NULL;
   guint32 uid, gid, mode;
   GChecksum *ret_checksum = NULL;
-  gboolean is_meta = OSTREE_OBJECT_TYPE_IS_META (objtype);
+  gboolean is_meta;
+  gboolean is_archived_content;
+
+  is_meta = OSTREE_OBJECT_TYPE_IS_META (objtype);
+  is_archived_content = objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT;
 
   if (g_cancellable_set_error_if_cancelled (cancellable, error))
     return FALSE;
@@ -670,14 +680,13 @@ ostree_create_file_from_input (GFile            *dest_file,
     }
   else
     {
-      mode = S_IFREG | 0666;
+      mode = S_IFREG | 0664;
     }
   dest_path = ot_gfile_get_path_cached (dest_file);
 
   if (S_ISDIR (mode))
     {
-      if (mkdir (ot_gfile_get_path_cached (dest_file),
-                 g_file_info_get_attribute_uint32 (finfo, "unix::mode")) < 0)
+      if (mkdir (ot_gfile_get_path_cached (dest_file), mode) < 0)
         {
           ot_util_set_error_from_errno (error, errno);
           goto out;
@@ -748,7 +757,7 @@ ostree_create_file_from_input (GFile            *dest_file,
       goto out;
     }
 
-  if (finfo != NULL)
+  if (finfo != NULL && !is_meta && !is_archived_content)
     {
       uid = g_file_info_get_attribute_uint32 (finfo, "unix::uid");
       gid = g_file_info_get_attribute_uint32 (finfo, "unix::gid");
@@ -758,11 +767,6 @@ ostree_create_file_from_input (GFile            *dest_file,
           ot_util_set_error_from_errno (error, errno);
           goto out;
         }
-    }
-  else
-    {
-      uid = geteuid ();
-      gid = getegid ();
     }
 
   if (!S_ISLNK (mode))
@@ -781,9 +785,14 @@ ostree_create_file_from_input (GFile            *dest_file,
         goto out;
     }
 
-  if (ret_checksum && !is_meta)
+  if (ret_checksum && !is_meta && !is_archived_content)
     {
-      ostree_checksum_update_stat (ret_checksum, uid, gid, mode);
+      g_assert (finfo != NULL);
+
+      ostree_checksum_update_stat (ret_checksum,
+                                   g_file_info_get_attribute_uint32 (finfo, "unix::uid"),
+                                   g_file_info_get_attribute_uint32 (finfo, "unix::gid"),
+                                   mode);
       if (xattrs)
         g_checksum_update (ret_checksum, (guint8*)g_variant_get_data (xattrs), g_variant_get_size (xattrs));
     }

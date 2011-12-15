@@ -373,8 +373,14 @@ ostree_builtin_pull (int argc, char **argv, const char *repo_path, GError **erro
     {
       if (!ostree_validate_checksum_string (rev, error))
         goto out;
+
+      if (!ostree_repo_prepare_transaction (repo, NULL, error))
+        goto out;
       
       if (!store_commit_recurse (repo, soup, base_uri, rev, error))
+        goto out;
+
+      if (!ostree_repo_commit_transaction (repo, NULL, error))
         goto out;
       
       if (!ostree_repo_write_ref (repo, remote, branch, rev, error))
