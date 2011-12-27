@@ -1,0 +1,11 @@
+{
+  "name": "gnomeos-3.4",
+  "architectures": ["i686"],
+  "base": "gnomeos-3.4-yocto",
+
+  "components": [
+   		"libxslt",
+   		"gtk-doc",
+   		"gobject-introspection"
+		]
+}
