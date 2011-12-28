@@ -90,9 +90,9 @@ class OstbuildCompileOne(builtins.Builtin):
 
         for arg in args:
             if arg.startswith('--ostbuild-resultdir='):
-                self.ostbuild_resultdir=arg[len('ostbuild-resultdir='):]
-            elif arg.startswith('ostbuild-meta='):
-                self.ostbuild_meta=arg[len('ostbuild-meta='):]
+                self.ostbuild_resultdir=arg[len('--ostbuild-resultdir='):]
+            elif arg.startswith('--ostbuild-meta='):
+                self.ostbuild_meta=arg[len('--ostbuild-meta='):]
             elif arg.startswith('--'):
                 self.configargs.append(arg)
             else:
@@ -101,10 +101,10 @@ class OstbuildCompileOne(builtins.Builtin):
         self.metadata = {}
 
         if self.ostbuild_meta is None:
-            output = subprocess.check_output(['ostbuild-autodiscover-meta'])
+            output = subprocess.check_output(['ostbuild', 'autodiscover-meta'])
             ostbuild_meta_f = StringIO(output)
         else:
-            ostbuild_meta_f = open(ostbuild_meta)
+            ostbuild_meta_f = open(self.ostbuild_meta)
 
         for line in ostbuild_meta_f:
             (k,v) = line.split('=', 1)
@@ -196,7 +196,7 @@ class OstbuildCompileOne(builtins.Builtin):
     
         artifact_prefix='artifact-%s,%s,%s,%s,%s' % (root_name, root_version, name, branch, version)
 
-        tempdir = tempfile.mkdtemp(prefix='ostree-build-%s-' % (name,))
+        tempdir = tempfile.mkdtemp(prefix='ostbuild-%s-' % (name,))
         self.tempfiles.append(tempdir)
         args = ['make', 'install', 'DESTDIR=' + tempdir]
         run_sync(args, cwd=builddir)
@@ -247,7 +247,7 @@ class OstbuildCompileOne(builtins.Builtin):
     
     def make_artifact(self, name, from_files, tempdir=None, resultdir=None):
         targz_name = name + '.tar.gz'
-        (fd,filelist_temp)=tempfile.mkstemp(prefix='ostree-filelist-%s' % (name, ))
+        (fd,filelist_temp)=tempfile.mkstemp(prefix='ostbuild-filelist-%s' % (name, ))
         os.close(fd)
         self.tempfiles.append(filelist_temp)
         f = open(filelist_temp, 'w')

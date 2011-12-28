@@ -26,16 +26,18 @@ BRANCH=$1
 test -n "$BRANCH" || usage
 shift
 
-ARCH=x86
+YOCTO_ARCH=x86
+MACHINE=i686
+REF="bases/gnomeos-3.4-yocto-${MACHINE}-${BRANCH}"
 
 OSTREE_VER=$(cd $SCRIPT_SRCDIR && git describe)
 
 BUILDDIR=$WORKDIR/tmp-eglibc
 
 OSTREE_REPO=$WORKDIR/repo
-BUILD_TAR=$BUILDDIR/deploy/images/gnomeos-contents-$BRANCH-qemu${ARCH}.tar.gz
+BUILD_TAR=$BUILDDIR/deploy/images/gnomeos-contents-$BRANCH-qemu${YOCTO_ARCH}.tar.gz
 
 BUILD_TIME=$(date -r $BUILD_TAR)
 
-ostree --repo=${OSTREE_REPO} commit --skip-if-unchanged -s "Build from OSTree ${OSTREE_VER}" -b "gnomeos-yocto-$ARCH-$BRANCH" --tree=tar=${BUILD_TAR}
-ostree --repo=${OSTREE_REPO} diff "gnomeos-yocto-$ARCH-$BRANCH"^ "gnomeos-yocto-$ARCH-$BRANCH"
+ostree --repo=${OSTREE_REPO} commit --skip-if-unchanged -s "Build from OSTree ${OSTREE_VER}" -b "${REF}" --tree=tar=${BUILD_TAR}
+ostree --repo=${OSTREE_REPO} diff "${REF}"^ "${REF}" || true

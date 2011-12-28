@@ -30,11 +30,9 @@ def parse_artifact_name(artifact_basename):
             'version': match.group(5),
             'type': match.group(6)}
 
-def branch_name_for_build(buildroot, name, branch):
-    return 'artifacts/%s/%s/%s' % (buildroot, name, branch)
-
 def branch_name_for_artifact(a):
-    return branch_name_for_build(a['buildroot'],
-                                 a['name'],
-                                 a['branch'])
+    return 'artifacts/%s/%s/%s/%s' % (a['buildroot'],
+                                      a['name'],
+                                      a['branch'],
+                                      a['type'])
 

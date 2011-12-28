@@ -21,7 +21,7 @@ import json
 
 from . import builtins
 from .ostbuildlog import log, fatal
-from .subprocess_helpers import run_sync
+from .subprocess_helpers import run_sync, run_sync_get_output
 from . import ostbuildrc
 from . import buildutil
 from . import kvfile
@@ -80,25 +80,21 @@ class OstbuildBuild(builtins.Builtin):
         component_src = self._ensure_vcs_checkout(name, keytype, uri, branch)
         buildroot = '%s-%s-devel' % (self.manifest['name'], architecture)
         branchname = 'artifacts/%s/%s/%s' % (buildroot, name, branch)
-        try:
-            previous_commit_version = subprocess.check_output(['ostree', '--repo=' + self.repo,
-                                                               'rev-parse', branchname],
-                                                              stderr=open('/dev/null', 'w'))
-            previous_commit_version = previous_commit_version.strip()
-            log("Previous build of '%s' is %s" % (branchname, previous_commit_version))
-        except subprocess.CalledProcessError, e:
-            previous_commit_version = None
-            log("No previous build for '%s' found" % (branchname, ))
+        current_buildroot_version = run_sync_get_output(['ostree', '--repo=' + self.repo,
+                                                         'rev-parse', buildroot])
+        current_buildroot_version = current_buildroot_version.strip()
+        previous_commit_version = run_sync_get_output(['ostree', '--repo=' + self.repo,
+                                                       'rev-parse', branchname],
+                                                      stderr=open('/dev/null', 'w'),
+                                                      none_on_error=True)
         if previous_commit_version is not None:
-            previous_artifact_version = subprocess.check_output(['ostree', '--repo=' + self.repo,
-                                                                 'show', '--print-metadata-key=ostbuild-artifact-version', previous_commit_version])
+            log("Previous build of '%s' is %s" % (branchname, previous_commit_version))
+            previous_artifact_version = run_sync_get_output(['ostree', '--repo=' + self.repo,
+                                                             'show', '--print-metadata-key=ostbuild-artifact-version', previous_commit_version])
             previous_artifact_version = previous_artifact_version.strip()
-            previous_buildroot_version = subprocess.check_output(['ostree', '--repo=' + self.repo,
-                                                                  'show', '--print-metadata-key=ostbuild-buildroot-version', previous_commit_version])
+            previous_buildroot_version = run_sync_get_output(['ostree', '--repo=' + self.repo,
+                                                              'show', '--print-metadata-key=ostbuild-buildroot-version', previous_commit_version])
             previous_buildroot_version = previous_buildroot_version.strip()
-            current_buildroot_version = subprocess.check_output(['ostree', '--repo=' + self.repo,
-                                                                 'rev-parse', buildroot])
-            current_buildroot_version = current_buildroot_version.strip()
             
             previous_vcs_version = self._parse_artifact_vcs_version(previous_artifact_version)
             current_vcs_version = self._get_vcs_version_from_checkout(name)
@@ -116,8 +112,10 @@ class OstbuildBuild(builtins.Builtin):
                     return
                 else:
                     log("Buildroot is now '%s'" % (current_buildroot_version, ))
+        else:
+            log("No previous build for '%s' found" % (branchname, ))
         
-        component_resultdir = os.path.join(self.workdir, 'name', 'results')
+        component_resultdir = os.path.join(self.workdir, name, 'results')
         if os.path.isdir(component_resultdir):
             shutil.rmtree(component_resultdir)
         os.makedirs(component_resultdir)
@@ -136,13 +134,14 @@ class OstbuildBuild(builtins.Builtin):
         artifact_files = []
         for name in os.listdir(component_resultdir):
             if name.startswith('artifact-'):
+                log("Generated artifact file: %s" % (name, ))
                 artifact_files.append(os.path.join(component_resultdir, name))
         assert len(artifact_files) >= 1 and len(artifact_files) <= 2
         run_sync(['ostbuild', 'commit-artifacts',
                   '--repo=' + self.repo] + artifact_files)
         artifacts = []
         for filename in artifact_files:
-            parsed = buildutil.parse_artifact_name(name)
+            parsed = buildutil.parse_artifact_name(os.path.basename(filename))
             artifacts.append(parsed)
         def _sort_artifact(a, b):
             if a['type'] == b['type']:
@@ -154,7 +153,7 @@ class OstbuildBuild(builtins.Builtin):
         return artifacts
 
     def _compose(self, suffix, artifacts):
-        compose_contents = [self.manifest['base'] + '-' + suffix]
+        compose_contents = ['bases/' + self.manifest['base'] + '-' + suffix]
         compose_contents.extend(artifacts)
         child_args = ['ostree', '--repo=' + self.repo, 'compose',
                       '-b', self.manifest['name'] + '-' + suffix, '-s', 'Compose']
@@ -199,6 +198,6 @@ class OstbuildBuild(builtins.Builtin):
                 devel_branches = map(buildutil.branch_name_for_artifact, devel_artifacts)
                 self._compose(architecture + '-devel', devel_branches)
                 runtime_branches = map(buildutil.branch_name_for_artifact, runtime_artifacts)
-                self._compose(architecture + '-runtime', runtime_artifacts)
+                self._compose(architecture + '-runtime', runtime_branches)
         
 builtins.register(OstbuildBuild)

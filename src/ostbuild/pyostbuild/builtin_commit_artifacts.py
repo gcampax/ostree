@@ -51,8 +51,8 @@ class OstbuildCommitArtifacts(builtins.Builtin):
 
             run_sync(['ostree', '--repo=' + args.repo,
                       'commit', '-b', branch_name, '-s', 'Build ' + parsed['version'],
-                     '--add-metadata-string=ostree-buildroot-version=' + parsed['buildroot_version'],
-                     '--add-metadata-string=ostree-artifact-version=' + parsed['version'],
+                     '--add-metadata-string=ostbuild-buildroot-version=' + parsed['buildroot_version'],
+                     '--add-metadata-string=ostbuild-artifact-version=' + parsed['version'],
                      '--skip-if-unchanged', '--tar-autocreate-parents', '--tree=tar=' + arg])
                      
 builtins.register(OstbuildCommitArtifacts)

@@ -23,6 +23,44 @@ import subprocess
 
 from .ostbuildlog import log, fatal
 
+def _get_env_for_cwd(cwd=None, env=None):
+    # This dance is necessary because we want to keep the PWD
+    # environment variable up to date.  Not doing so is a recipie
+    # for triggering edge conditions in pwd lookup.
+    if (cwd is not None) and (env is None or ('PWD' in env)):
+        if env is None:
+            env_copy = os.environ.copy()
+        else:
+            env_copy = env.copy()
+        if ('PWD' in env_copy) and (not cwd.startswith('/')):
+            env_copy['PWD'] = os.path.join(env_copy['PWD'], cwd)
+        else:
+            env_copy['PWD'] = cwd
+    else:
+        env_copy = env
+    return env_copy
+
+def run_sync_get_output(args, cwd=None, env=None, stderr=None, none_on_error=False):
+    log("running: %r" % (args,))
+    env_copy = _get_env_for_cwd(cwd, env)
+    f = open('/dev/null', 'r')
+    if stderr is None:
+        stderr_target = sys.stderr
+    else:
+        stderr_target = stderr
+    proc = subprocess.Popen(args, stdin=f, stdout=subprocess.PIPE, stderr=stderr_target,
+                            close_fds=True, cwd=cwd, env=env_copy)
+    f.close()
+    output = proc.communicate()[0].strip()
+    if proc.returncode != 0 and not none_on_error:
+        logfn = fatal
+    else:
+        logfn = log
+    logfn("pid %d exited with code %d, %d bytes of output" % (proc.pid, proc.returncode, len(output)))
+    if proc.returncode == 0:
+        return output
+    return None
+
 def run_sync(args, cwd=None, env=None):
     log("running: %r" % (args,))
     f = open('/dev/null', 'r')

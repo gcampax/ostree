@@ -67,7 +67,7 @@ class OstbuildChrootCompileOne(builtins.Builtin):
         
         workdir_is_tmp = (args.workdir is None)
         if workdir_is_tmp:
-            workdir = tempfile.mkdtemp(prefix='ostree-chroot-compile-')
+            workdir = tempfile.mkdtemp(prefix='ostbuild-chroot-compile-')
         else:
             workdir = args.workdir
             
@@ -136,7 +136,7 @@ class OstbuildChrootCompileOne(builtins.Builtin):
                       '/bin/sh']
         if not args.debug_shell:
             child_args += ['-c',
-                     'cd "%s" && ostbuild compile-one OSTBUILD_RESULTDIR=/ostbuild/results OSTBUILD_META=_ostbuild-meta' % (chroot_sourcedir, )
+                     'cd "%s" && ostbuild compile-one --ostbuild-resultdir=/ostbuild/results --ostbuild-meta=_ostbuild-meta' % (chroot_sourcedir, )
                      ]
         run_sync(child_args, env=BUILD_ENV)
         
