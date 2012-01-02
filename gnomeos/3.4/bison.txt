@@ -1,0 +1,2 @@
+SRC=git:git://git.savannah.gnu.org/bison.git
+COMPONENT=devel

@@ -45,7 +45,7 @@ class OstbuildChrootCompileOne(builtins.Builtin):
         parser.add_argument('--resultdir')
         parser.add_argument('--buildroot', required=True)
         parser.add_argument('--meta')
-        parser.add_argument('--debug-shell', type=bool)
+        parser.add_argument('--debug-shell', action='store_true')
         
         args = parser.parse_args(argv)
 

@@ -26,6 +26,9 @@ from . import ostbuildrc
 from . import buildutil
 from . import kvfile
 
+class BuildOptions(object):
+    pass
+
 class OstbuildBuild(builtins.Builtin):
     name = "build"
     short_description = "Rebuild all artifacts from the given manifest"
@@ -33,17 +36,32 @@ class OstbuildBuild(builtins.Builtin):
     def __init__(self):
         builtins.Builtin.__init__(self)
 
-    def _ensure_vcs_checkout(self, name, keytype, uri, branch):
+    def _ensure_vcs_mirror(self, name, keytype, uri, branch):
         assert keytype == 'git'
-        destname = os.path.join(self.srcdir, name)
-        tmp_destname = destname + '.tmp'
-        if os.path.isdir(tmp_destname):
-            shutil.rmtree(tmp_destname)
-        if not os.path.isdir(destname):
-            run_sync(['git', 'clone', uri, tmp_destname])
-            os.rename(tmp_destname, destname)
-        subprocess.check_call(['git', 'checkout', '-q', branch], cwd=destname)
-        return destname
+        mirror = os.path.join(self.srcdir, name)
+        tmp_mirror = mirror + '.tmp'
+        if os.path.isdir(tmp_mirror):
+            shutil.rmtree(tmp_mirror)
+        if not os.path.isdir(mirror):
+            run_sync(['git', 'clone', '--mirror', uri, tmp_mirror])
+            os.rename(tmp_mirror, mirror)
+        return mirror
+
+    def _get_vcs_checkout(self, name, keytype, mirrordir, branch):
+        checkoutdir = os.path.join(self.srcdir, '_checkouts')
+        if not os.path.isdir(checkoutdir):
+            os.makedirs(checkoutdir)
+        dest = os.path.join(checkoutdir, name)
+        tmp_dest = dest + '.tmp'
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        if os.path.isdir(tmp_dest):
+            shutil.rmtree(tmp_dest)
+        subprocess.check_call(['git', 'clone', '--depth=1', '-q', mirrordir, tmp_dest])
+        subprocess.check_call(['git', 'checkout', '-q', branch], cwd=tmp_dest)
+        subprocess.check_call(['git', 'submodule', 'update', '--init'], cwd=tmp_dest)
+        os.rename(tmp_dest, dest)
+        return dest
 
     def _get_vcs_version_from_checkout(self, name):
         vcsdir = os.path.join(self.srcdir, name)
@@ -75,9 +93,20 @@ class OstbuildBuild(builtins.Builtin):
             raise ValueError("Invalid artifact version '%s'" % (ver, ))
         return vcs_ver[1:]
 
+    def _get_ostbuild_chroot_args(self, architecture):
+        current_machine = os.uname()[4]
+        if current_machine != architecture:
+            args = ['setarch', architecture]
+        else:
+            args = []
+        args.extend(['ostbuild', 'chroot-compile-one',
+                     '--repo=' + self.repo])
+        return args
+
     def _build_one_component(self, name, architecture, meta):
         (keytype, uri, branch) = self._parse_src_key(meta['SRC'])
-        component_src = self._ensure_vcs_checkout(name, keytype, uri, branch)
+        component_vcs_mirror = self._ensure_vcs_mirror(name, keytype, uri, branch)
+        component_src = self._get_vcs_checkout(name, keytype, component_vcs_mirror, branch)
         buildroot = '%s-%s-devel' % (self.manifest['name'], architecture)
         branchname = 'artifacts/%s/%s/%s' % (buildroot, name, branch)
         current_buildroot_version = run_sync_get_output(['ostree', '--repo=' + self.repo,
@@ -119,18 +148,18 @@ class OstbuildBuild(builtins.Builtin):
         if os.path.isdir(component_resultdir):
             shutil.rmtree(component_resultdir)
         os.makedirs(component_resultdir)
-        current_machine = os.uname()[4]
-        if current_machine != architecture:
-            log("Current architecture '%s' differs from target '%s', using setarch" % (current_machine, architecture))
-            args = ['setarch', architecture]
+
+        chroot_args = self._get_ostbuild_chroot_args(architecture)
+        chroot_args.extend(['--buildroot=' + buildroot,
+                            '--workdir=' + self.workdir,
+                            '--resultdir=' + component_resultdir])
+        if self.buildopts.shell_on_failure:
+            ecode = run_sync(chroot_args, cwd=component_src, fatal_on_error=False)
+            if ecode != 0:
+                run_sync(chroot_args + ['--debug-shell'], cwd=component_src, keep_stdin=True, fatal_on_error=False)
+                fatal("Exiting after debug shell")
         else:
-            args = []
-        args.extend(['ostbuild', 'chroot-compile-one',
-                     '--repo=' + self.repo,
-                     '--buildroot=' + buildroot,
-                     '--workdir=' + self.workdir,
-                     '--resultdir=' + component_resultdir])
-        run_sync(args, cwd=component_src)
+            run_sync(chroot_args, cwd=component_src, fatal_on_error=True)
         artifact_files = []
         for name in os.listdir(component_resultdir):
             if name.startswith('artifact-'):
@@ -163,10 +192,15 @@ class OstbuildBuild(builtins.Builtin):
     def execute(self, argv):
         parser = argparse.ArgumentParser(description=self.short_description)
         parser.add_argument('--manifest', required=True)
+        parser.add_argument('--start-at')
+        parser.add_argument('--shell-on-failure', action='store_true')
 
         args = parser.parse_args(argv)
-
+        
         self.parse_config()
+
+        self.buildopts = BuildOptions()
+        self.buildopts.shell_on_failure = args.shell_on_failure
 
         self.manifest = json.load(open(args.manifest))
         dirname = os.path.dirname(args.manifest)
@@ -175,7 +209,18 @@ class OstbuildBuild(builtins.Builtin):
         devel_components = []
         runtime_artifacts = []
         devel_artifacts = []
-        for component_name in components:
+        if args.start_at:
+            start_at_index = -1 
+            for i,component_name in enumerate(components):
+                if component_name == args.start_at:
+                    start_at_index = i
+                    break
+            if start_at_index == -1:
+                fatal("Unknown component '%s' for --start-at" % (args.start_at, ))
+        else:
+            start_at_index = 0
+            
+        for component_name in components[start_at_index:]:
             for architecture in self.manifest['architectures']:
                 path = os.path.join(dirname, component_name + '.txt')
                 f = open(path)

@@ -1,0 +1,3 @@
+UPSTREAM_SRC=git:git://github.com/cgwalters/flex
+SRC=git:file:///src/flex.git
+COMPONENT=devel

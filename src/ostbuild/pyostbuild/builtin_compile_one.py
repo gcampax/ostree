@@ -118,8 +118,10 @@ class OstbuildCompileOne(builtins.Builtin):
 
         autogen_script = None
         if not os.path.exists('configure'):
-            for name in ['autogen', 'autogen.sh']:
+            log("No 'configure' script found, looking for autogen/bootstrap")
+            for name in ['autogen', 'autogen.sh', 'bootstrap']:
                 if os.path.exists(name):
+                    log("Using bootstrap script '%s'" % (name, ))
                     autogen_script = name
             if autogen_script is None:
                 fatal("No configure or autogen script detected; unknown buildsystem")
@@ -128,6 +130,8 @@ class OstbuildCompileOne(builtins.Builtin):
             env = dict(os.environ)
             env['NOCONFIGURE'] = '1'
             run_sync(['./' + autogen_script], env=env)
+        else:
+            log("Using existing 'configure' script")
     
         use_builddir = True
         doesnot_support_builddir = self._has_buildapi_configure_variable('no-builddir')

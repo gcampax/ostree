@@ -4,8 +4,10 @@
   "base": "gnomeos-3.4-yocto",
 
   "components": [
-   		"libxslt",
-   		"gtk-doc",
+   		"gtk-doc-stub",
+   		"gnulib",
+   		"flex",
+   		"bison",
    		"gobject-introspection"
 		]
 }

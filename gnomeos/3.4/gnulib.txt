@@ -1,0 +1,3 @@
+UPSTREAM_SRC=git:git://git.savannah.gnu.org/gnulib.git
+SRC=git:file:///src/gnulib
+COMPONENT=devel
