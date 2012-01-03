@@ -5,9 +5,8 @@
 
   "components": [
    		"gtk-doc-stub",
-   		"gnulib",
-   		"flex",
    		"bison",
+   		"flex",
    		"gobject-introspection"
 		]
 }
