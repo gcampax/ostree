@@ -63,38 +63,41 @@ ostree_builtin_init (int argc, char **argv, GFile *repo_path, GError **error)
                                 NULL, FALSE, 0, NULL,
                                 NULL, error))
     goto out;
-  g_clear_object (&child);
 
+  g_clear_object (&child);
   child = g_file_get_child (repo_path, "objects");
   if (!g_file_make_directory (child, NULL, error))
     goto out;
-  g_clear_object (&child);
 
+  g_clear_object (&grandchild);
+  grandchild = g_file_get_child (child, "packs");
+  if (!g_file_make_directory (grandchild, NULL, error))
+    goto out;
+
+  g_clear_object (&child);
   child = g_file_get_child (repo_path, "tmp");
   if (!g_file_make_directory (child, NULL, error))
     goto out;
-  g_clear_object (&child);
 
+  g_clear_object (&child);
   child = g_file_get_child (repo_path, "refs");
   if (!g_file_make_directory (child, NULL, error))
     goto out;
 
+  g_clear_object (&grandchild);
   grandchild = g_file_get_child (child, "heads");
   if (!g_file_make_directory (grandchild, NULL, error))
     goto out;
-  g_clear_object (&grandchild);
 
+  g_clear_object (&grandchild);
   grandchild = g_file_get_child (child, "remotes");
   if (!g_file_make_directory (grandchild, NULL, error))
     goto out;
-  g_clear_object (&grandchild);
 
   g_clear_object (&child);
-
   child = g_file_get_child (repo_path, "tags");
   if (!g_file_make_directory (child, NULL, error))
     goto out;
-  g_clear_object (&child);
 
   ret = TRUE;
  out:
