@@ -97,6 +97,13 @@ typedef enum {
  */
 #define OSTREE_ARCHIVED_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(uuuuusa(ayay))")
 
+/* Pack files
+ * u - Version
+ * a{sv} - Metadata
+ * a(ysay) - Contents (flags, checksum, content)
+ */
+#define OSTREE_PACK_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(ua{sv}a(ysay))")
+
 gboolean ostree_validate_checksum_string (const char *sha256,
                                           GError    **error);
 

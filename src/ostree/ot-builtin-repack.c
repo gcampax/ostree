@@ -30,7 +30,14 @@
 
 #include <gio/gunixoutputstream.h>
 
+#define DEFAULT_PACK_SIZE_BYTES (50*1024*1024)
+
+static char* opt_pack_size;
+static char* opt_compression;
+
 static GOptionEntry options[] = {
+  { "pack-size", 0, 0, G_OPTION_ARG_STRING, &opt_pack_size, "Maximum uncompressed size of packfiles in bytes; may be suffixed with k, m, or g", "BYTES" },
+  { "compression", 0, 0, G_OPTION_ARG_STRING, &opt_compression, "Compress generated packfiles using COMPRESSION; may be one of 'gzip', 'xz'", "COMPRESSION" },
   { NULL }
 };
 
@@ -40,8 +47,8 @@ typedef struct {
   guint n_dirmeta;
   guint n_dirtree;
   guint n_files;
-  guint64 object_bucket_count[24];
-  guint64 object_bucket_size[24];
+  GPtrArray *objects;
+  GArray *object_sizes;
   gboolean had_error;
   GError **error;
 } OtRepackData;
@@ -145,10 +152,13 @@ object_iter_callback (OstreeRepo    *repo,
       data->n_files++;
       break;
     case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META:
-      return; /* NOTE - we do nothing for archived meta right now */
+      /* Counted under files */
+      break;
     }
 
   objsize = g_file_info_get_size (file_info);
+
+  g_ptr_array_add (data->objects, 
 
   bucket = size_to_bucket (objsize);
   data->object_bucket_count[bucket]++;
@@ -171,6 +181,7 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   OstreeRepo *repo = NULL;
   GCancellable *cancellable = NULL;
   int i;
+  guint64 total_size;
 
   memset (&data, 0, sizeof (data));
 
@@ -186,6 +197,8 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
 
   data.repo = repo;
   data.error = error;
+  data.objects = g_ptr_array_new_with_free_func (g_free);
+  data.object_sizes = g_array_new (FALSE, FALSE, sizeof (guint64));
 
   if (!ostree_repo_iter_objects (repo, object_iter_callback, &data, error))
     goto out;
@@ -198,6 +211,7 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   g_print ("Tree meta: %u\n", data.n_dirmeta);
   g_print ("Files: %u\n", data.n_files);
 
+  total_size = 0;
   for (i = 0; i < G_N_ELEMENTS(data.object_bucket_size); i++)
     {
       int size;
@@ -207,7 +221,9 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
         size = 1 << (i + 7);
       g_print ("%d: %" G_GUINT64_FORMAT " objects, %" G_GUINT64_FORMAT " bytes\n",
                size, data.object_bucket_count[i], data.object_bucket_size[i]);
+      total_size += data.object_bucket_size[i];
     }
+  g_print ("Total size: %" G_GUINT64_FORMAT "\n", total_size);
 
   ret = TRUE;
  out:
