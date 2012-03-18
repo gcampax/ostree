@@ -31,20 +31,24 @@
 #include <gio/gunixinputstream.h>
 #include <gio/gunixoutputstream.h>
 
-#define DEFAULT_PACK_SIZE_BYTES (50*1024*1024)
+#define OT_DEFAULT_PACK_SIZE_BYTES (50*1024*1024)
+#define OT_GZIP_COMPRESSION_LEVEL (8)
 
 static gboolean opt_analyze_only;
 static char* opt_pack_size;
 static char* opt_int_compression;
+static char* opt_ext_compression;
 
 typedef enum {
-  OT_INTERNAL_COMPRESSION_NONE,
-  OT_INTERNAL_COMPRESSION_GZIP
-} OtInternalCompressionType;
+  OT_COMPRESSION_NONE,
+  OT_COMPRESSION_GZIP,
+  OT_COMPRESSION_XZ
+} OtCompressionType;
 
 static GOptionEntry options[] = {
   { "pack-size", 0, 0, G_OPTION_ARG_STRING, &opt_pack_size, "Maximum uncompressed size of packfiles in bytes; may be suffixed with k, m, or g", "BYTES" },
-  { "internal-compression", 0, 0, G_OPTION_ARG_STRING, &opt_int_compression, "Compress objects using COMPRESSION; may be one of 'gzip', 'xz'", "COMPRESSION" },
+  { "internal-compression", 0, 0, G_OPTION_ARG_STRING, &opt_int_compression, "Compress objects using COMPRESSION", "COMPRESSION" },
+  { "external-compression", 0, 0, G_OPTION_ARG_STRING, &opt_ext_compression, "Compress entire packfiles using COMPRESSION", "COMPRESSION" },
   { "analyze-only", 0, 0, G_OPTION_ARG_NONE, &opt_analyze_only, "Just analyze current state", NULL },
   { NULL }
 };
@@ -53,7 +57,8 @@ typedef struct {
   OstreeRepo *repo;
 
   guint64 pack_size;
-  OtInternalCompressionType int_compression;
+  OtCompressionType int_compression;
+  OtCompressionType ext_compression;
 
   guint n_commits;
   guint n_dirmeta;
@@ -119,7 +124,7 @@ create_compressor_subprocess (OtBuildRepackFile *self,
   
   (void) close (target_stdout_fd);
 
-  ret_output = g_unix_input_stream_new (stdin_pipe_fd, TRUE);
+  ret_output = g_unix_output_stream_new (stdin_pipe_fd, TRUE);
 
   ret = TRUE;
   ot_transfer_out_value (out_output, &ret_output);
@@ -308,13 +313,29 @@ create_pack_file (OtRepackData        *data,
       char buf[4096];
       guint64 obj_bytes_written;
       GOutputStream *write_pack_out;
+      guchar entry_flags;
 
       g_variant_get (object_data, "(t&su)", &objsize, &checksum, &objtype_u32);
                      
       objtype = (OstreeObjectType) objtype_u32;
 
       ot_clear_gvariant (&object_header);
-      object_header = g_variant_new ("(yst)", GUINT32_TO_BE (0), checksum, (guint32)objtype, objsize);
+      entry_flags = 0;
+      if (data->int_compression != OT_COMPRESSION_NONE)
+        {
+          switch (data->int_compression)
+            {
+          case OT_COMPRESSION_GZIP:
+            entry_flags |= OSTREE_PACK_FILE_ENTRY_FLAG_COMPRESSION_GZIP;
+            break;
+            case OT_COMPRESSION_NONE:
+              break;
+            default:
+              g_assert_not_reached ();
+            }
+        }
+
+      object_header = g_variant_new ("(yst)", GUINT32_TO_BE (entry_flags), checksum, (guint32)objtype, objsize);
 
       if (!write_aligned_variant (pack_out, object_header, pack_checksum,
                                   &offset, cancellable, error))
@@ -328,13 +349,13 @@ create_pack_file (OtRepackData        *data,
       if (!object_input)
         goto out;
 
-      if (data->int_compression != OT_INTERNAL_COMPRESSION_NONE)
+      if (data->int_compression != OT_COMPRESSION_NONE)
         {
           g_clear_object (&compressor);
           switch (data->int_compression)
             {
-            case OT_INTERNAL_COMPRESSION_GZIP:
-              compressor = (GConverter*)g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, 8);
+            case OT_COMPRESSION_GZIP:
+              compressor = (GConverter*)g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, OT_GZIP_COMPRESSION_LEVEL);
               break;
             default:
               g_assert_not_reached ();
@@ -383,6 +404,8 @@ create_pack_file (OtRepackData        *data,
 
   pack_dir = g_file_resolve_relative_path (ostree_repo_get_path (data->repo),
                                            "objects/pack");
+  if (!ot_gfile_ensure_directory (pack_dir, FALSE, error))
+    goto out;
 
   pack_name = g_strconcat ("ostpack-", g_checksum_get_string (pack_checksum), ".data", NULL);
   pack_file_path = g_file_get_child (pack_dir, pack_name);
@@ -514,6 +537,7 @@ cluster_objects_stupidly (OtRepackData      *data)
 
 static gboolean
 parse_size_spec_with_suffix (const char *spec,
+                             guint64     default_value,
                              guint64    *out_size,
                              GError    **error)
 {
@@ -521,41 +545,76 @@ parse_size_spec_with_suffix (const char *spec,
   char *endptr = NULL;
   guint64 ret_size;
 
-  ret_size = g_ascii_strtoull (spec, &endptr, 10);
-  
-  if (endptr && *endptr)
+  if (spec == NULL)
     {
-      char suffix = *endptr;
-      
-      switch (suffix)
+      ret_size = default_value;
+      endptr = NULL;
+    }
+  else
+    {
+      ret_size = g_ascii_strtoull (spec, &endptr, 10);
+  
+      if (endptr && *endptr)
         {
-        case 'k':
-        case 'K':
-          {
-            ret_size *= 1024;
-            break;
-          }
-        case 'm':
-        case 'M':
-          {
-            ret_size *= (1024 * 1024);
-            break;
-          }
-        case 'g':
-        case 'G':
-          {
-            ret_size *= (1024 * 1024 * 1024);
-            break;
-          }
-        default:
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Invalid size suffix '%c'", suffix);
-          goto out;
+          char suffix = *endptr;
+      
+          switch (suffix)
+            {
+            case 'k':
+            case 'K':
+              {
+                ret_size *= 1024;
+                break;
+              }
+            case 'm':
+            case 'M':
+              {
+                ret_size *= (1024 * 1024);
+                break;
+              }
+            case 'g':
+            case 'G':
+              {
+                ret_size *= (1024 * 1024 * 1024);
+                break;
+              }
+            default:
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid size suffix '%c'", suffix);
+              goto out;
+            }
         }
     }
 
   ret = TRUE;
   *out_size = ret_size;
+ out:
+  return ret;
+}
+
+static gboolean
+parse_compression_string (const char *compstr,
+                          OtCompressionType *out_comptype,
+                          GError           **error)
+{
+  gboolean ret = FALSE;
+  OtCompressionType ret_comptype;
+  
+  if (compstr == NULL)
+    ret_comptype = OT_COMPRESSION_NONE;
+  else if (strcmp (compstr, "gzip") == 0)
+    ret_comptype = OT_COMPRESSION_GZIP;
+  else if (strcmp (compstr, "xz") == 0)
+    ret_comptype = OT_COMPRESSION_XZ;
+  else
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid compression '%s'", compstr);
+      goto out;
+    }
+
+  ret = TRUE;
+  *out_comptype = ret_comptype;
  out:
   return ret;
 }
@@ -587,28 +646,14 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   data.repo = repo;
   data.error = error;
   data.objects = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
-  if (opt_pack_size)
-    {
-      if (!parse_size_spec_with_suffix (opt_pack_size, &data.pack_size, error))
-        goto out;
-    }
-  else
-    {
-      data.pack_size = DEFAULT_PACK_SIZE_BYTES;
-    }
-  if (opt_int_compression)
-    {
-      if (strcmp (opt_int_compression, "gzip") == 0)
-        data.int_compression = OT_INTERNAL_COMPRESSION_GZIP;
-      else
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Invalid internal compression '%s'", opt_int_compression);
-          goto out;
-        }
-    }
-  else
-    data.int_compression = OT_INTERNAL_COMPRESSION_NONE;
+
+  if (!parse_size_spec_with_suffix (opt_pack_size, OT_DEFAULT_PACK_SIZE_BYTES, &data.pack_size, error))
+    goto out;
+  /* Default internal compression to gzip */
+  if (!parse_compression_string (opt_int_compression ? opt_int_compression : "gzip", &data.int_compression, error))
+    goto out;
+  if (!parse_compression_string (opt_ext_compression, &data.ext_compression, error))
+    goto out;
 
   if (!ostree_repo_iter_objects (repo, object_iter_callback, &data, error))
     goto out;

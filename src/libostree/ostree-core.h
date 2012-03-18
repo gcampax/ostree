@@ -113,6 +113,11 @@ typedef enum {
  */
 #define OSTREE_PACK_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(st))")
 
+typedef enum {
+  OSTREE_PACK_FILE_ENTRY_FLAG_NONE = 0,
+  OSTREE_PACK_FILE_ENTRY_FLAG_COMPRESSION_GZIP = (1 << 0)
+} OstreePackFileEntryFlag;
+
 /* Pack files
  * s - OSTPACKFILE
  * u - Version
