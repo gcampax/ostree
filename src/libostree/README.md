@@ -15,7 +15,7 @@ overhead.  In contrast, a git repository stores copies of
 zlib-compressed data.
 
 Key differences versus git
-----------------------------
+--------------------------
 
  * As mentioned above, extended attributes and owner uid/gid are versioned
  * SHA256 instead of SHA1
@@ -28,3 +28,16 @@ While this is still in planning, I plan to heavily optimize OSTree for
 versioning ELF operating systems.  In industry jargon, this would be
 "content-aware storage".
 
+Related work in storage
+-----------------------
+
+git: http://git-scm.com/
+Venti: http://plan9.bell-labs.com/magic/man2html/6/venti
+Elephant FS: http://www.hpl.hp.com/personal/Alistair_Veitch/papers/elephant-hotos/index.html
+
+Compression
+-----------
+
+xdelta: http://xdelta.org/
+Bsdiff: http://www.daemonology.net/bsdiff/
+xz: http://tukaani.org/xz/
