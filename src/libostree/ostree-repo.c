@@ -2294,43 +2294,54 @@ ostree_repo_commit_modifier_unref (OstreeRepoCommitModifier *modifier)
   return;
 }
 
+static guint
+hash_list_object_key (gconstpointer a)
+{
+  GVariant *variant = (gpointer)a;
+  const char *checksum;
+  OstreeObjectType objtype;
+  gint objtype_int;
+  
+  ostree_object_name_deserialize (variant, &checksum, &objtype);
+  objtype_int = (gint) objtype;
+  return g_str_hash (checksum) + g_int_hash (&objtype_int);
+}
 
 static gboolean
-iter_object_dir (OstreeRepo             *self,
-                 GFile                  *dir,
-                 OstreeRepoObjectIter    callback,
-                 gpointer                user_data,
-                 GError                **error)
+list_loose_object_dir (OstreeRepo             *self,
+                       GFile                  *dir,
+                       GHashTable             *inout_objects,
+                       GCancellable           *cancellable,
+                       GError                **error)
 {
   gboolean ret = FALSE;
   GError *temp_error = NULL;
   GFileEnumerator *enumerator = NULL;
   GFileInfo *file_info = NULL;
   const char *dirname = NULL;
+  char *dot = NULL;
+  GString *checksum = NULL;
 
   dirname = ot_gfile_get_basename_cached (dir);
 
   enumerator = g_file_enumerate_children (dir, OSTREE_GIO_FAST_QUERYINFO, 
                                           G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-                                          NULL, 
+                                          cancellable, 
                                           error);
   if (!enumerator)
     goto out;
   
-  while ((file_info = g_file_enumerator_next_file (enumerator, NULL, &temp_error)) != NULL)
+  while ((file_info = g_file_enumerator_next_file (enumerator, cancellable, &temp_error)) != NULL)
     {
       const char *name;
       guint32 type;
-      char *dot = NULL;
-      GFile *child = NULL;
-      GString *checksum = NULL;
       OstreeObjectType objtype;
 
       name = g_file_info_get_attribute_byte_string (file_info, "standard::name"); 
       type = g_file_info_get_attribute_uint32 (file_info, "standard::type");
 
       if (type == G_FILE_TYPE_DIRECTORY)
-        goto loop_out;
+        goto loop_next;
       
       if (g_str_has_suffix (name, ".file"))
         objtype = OSTREE_OBJECT_TYPE_RAW_FILE;
@@ -2345,25 +2356,33 @@ iter_object_dir (OstreeRepo             *self,
       else if (g_str_has_suffix (name, ".commit"))
         objtype = OSTREE_OBJECT_TYPE_COMMIT;
       else
-        goto loop_out;
+        goto loop_next;
           
       dot = strrchr (name, '.');
       g_assert (dot);
 
-      if ((dot - name) != 62)
-        goto loop_out;
-      
-      checksum = g_string_new (dirname);
-      g_string_append_len (checksum, name, 62);
-      
-      child = g_file_get_child (dir, name);
-      callback (self, checksum->str, objtype, child, file_info, user_data);
-      
-    loop_out:
-      if (checksum)
-        g_string_free (checksum, TRUE);
+      if ((dot - name) == 62)
+        {
+          GVariant *key, *value;
+
+          if (checksum)
+            g_string_free (checksum, TRUE);
+          checksum = g_string_new (dirname);
+          g_string_append_len (checksum, name, 62);
+          
+          key = ostree_object_name_serialize (checksum->str, objtype);
+          value = g_variant_new ("(b@astt)",
+                                 TRUE, g_variant_new_strv (NULL, 0),
+                                 g_file_info_get_attribute_uint64 (file_info,
+                                                                   G_FILE_ATTRIBUTE_TIME_CHANGED),
+                                 g_file_info_get_attribute_uint64 (file_info,
+                                                                   G_FILE_ATTRIBUTE_STANDARD_SIZE));
+          /* transfer ownership */
+          g_hash_table_replace (inout_objects, g_variant_ref_sink (key),
+                                g_variant_ref_sink (value));
+        }
+    loop_next:
       g_clear_object (&file_info);
-      g_clear_object (&child);
     }
   if (temp_error != NULL)
     {
@@ -2376,32 +2395,33 @@ iter_object_dir (OstreeRepo             *self,
   ret = TRUE;
  out:
   g_clear_object (&file_info);
+  g_clear_object (&enumerator);
+  if (checksum)
+    g_string_free (checksum, TRUE);
   return ret;
 }
 
-gboolean
-ostree_repo_iter_objects (OstreeRepo  *self,
-                          OstreeRepoObjectIter callback,
-                          gpointer       user_data,
-                          GError        **error)
+static gboolean
+list_loose_objects (OstreeRepo                     *self,
+                    GHashTable                     *inout_objects,
+                    GCancellable                   *cancellable,
+                    GError                        **error)
 {
+  gboolean ret = FALSE;
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   GFileEnumerator *enumerator = NULL;
-  gboolean ret = FALSE;
   GFileInfo *file_info = NULL;
   GError *temp_error = NULL;
-
-  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-  g_return_val_if_fail (priv->inited, FALSE);
+  GFile *objdir = NULL;
 
   enumerator = g_file_enumerate_children (priv->objects_dir, OSTREE_GIO_FAST_QUERYINFO, 
                                           G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-                                          NULL, 
+                                          cancellable, 
                                           error);
   if (!enumerator)
     goto out;
 
-  while ((file_info = g_file_enumerator_next_file (enumerator, NULL, &temp_error)) != NULL)
+  while ((file_info = g_file_enumerator_next_file (enumerator, cancellable, &temp_error)) != NULL)
     {
       const char *name;
       guint32 type;
@@ -2411,28 +2431,74 @@ ostree_repo_iter_objects (OstreeRepo  *self,
       
       if (strlen (name) == 2 && type == G_FILE_TYPE_DIRECTORY)
         {
-          GFile *objdir = g_file_get_child (priv->objects_dir, name);
-          if (!iter_object_dir (self, objdir, callback, user_data, error))
-            {
-              g_object_unref (objdir);
-              goto out;
-            }
-          g_object_unref (objdir);
+          g_clear_object (&objdir);
+          objdir = g_file_get_child (priv->objects_dir, name);
+          if (!list_loose_object_dir (self, objdir, inout_objects, cancellable, error))
+            goto out;
         }
-      g_object_unref (file_info);
+      g_clear_object (&file_info);
     }
   if (file_info == NULL && temp_error != NULL)
     {
       g_propagate_error (error, temp_error);
       goto out;
     }
-  if (!g_file_enumerator_close (enumerator, NULL, error))
+  if (!g_file_enumerator_close (enumerator, cancellable, error))
     goto out;
 
   ret = TRUE;
  out:
+  g_clear_object (&objdir);
   g_clear_object (&file_info);
   g_clear_object (&enumerator);
+  return ret;
+}
+
+/**
+ * ostree_repo_list_objects:
+ * @self:
+ * @flags:
+ * @out_objects: (out): Map of serialized object name to variant data
+ * @cancellable:
+ * @error:
+ *
+ * This function synchronously enumerates all objects in the
+ * repository, returning data in @out_objects.  @out_objects
+ * maps from keys returned by ostree_object_name_serialize()
+ * to #GVariant values of type %OSTREE_REPO_LIST_OBJECTS_VARIANT_TYPE.
+ *
+ * Returns: %TRUE on success, %FALSE on error, and @error will be set
+ */ 
+gboolean
+ostree_repo_list_objects (OstreeRepo                  *self,
+                          OstreeRepoListObjectsFlags   flags,
+                          GHashTable                 **out_objects,
+                          GCancellable                *cancellable,
+                          GError                     **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GHashTable *ret_objects = NULL;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+  g_return_val_if_fail (priv->inited, FALSE);
+  
+  ret_objects = g_hash_table_new_full (hash_list_object_key, g_variant_equal, (GDestroyNotify) g_variant_unref, (GDestroyNotify) g_variant_unref);
+
+  if (flags & OSTREE_REPO_LIST_OBJECTS_ALL)
+    flags |= (OSTREE_REPO_LIST_OBJECTS_LOOSE | OSTREE_REPO_LIST_OBJECTS_PACKED);
+
+  if (flags & OSTREE_REPO_LIST_OBJECTS_LOOSE)
+    {
+      if (!list_loose_objects (self, ret_objects, cancellable, error))
+        goto out;
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_objects, &ret_objects);
+ out:
+  if (ret_objects)
+    g_hash_table_unref (ret_objects);
   return ret;
 }
 

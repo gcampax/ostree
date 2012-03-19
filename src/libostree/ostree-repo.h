@@ -226,17 +226,27 @@ gboolean       ostree_repo_read_commit (OstreeRepo *self,
                                         GCancellable *cancellable,
                                         GError  **error);
 
-typedef void (*OstreeRepoObjectIter) (OstreeRepo *self, 
-                                      const char *checksum,
-                                      OstreeObjectType type,
-                                      GFile      *path,
-                                      GFileInfo  *fileinfo,
-                                      gpointer user_data);
+typedef enum {
+  OSTREE_REPO_LIST_OBJECTS_LOOSE = (1 << 0),
+  OSTREE_REPO_LIST_OBJECTS_PACKED = (1 << 1),
+  OSTREE_REPO_LIST_OBJECTS_ALL = (1 << 2)
+} OstreeRepoListObjectsFlags;
 
-gboolean     ostree_repo_iter_objects (OstreeRepo  *self,
-                                       OstreeRepoObjectIter callback,
-                                       gpointer       user_data,
-                                       GError        **error);
+/**
+ * OSTREE_REPO_LIST_OBJECTS_VARIANT_TYPE:
+ *
+ * b - %TRUE if object is available "loose"
+ * as - List of pack file checksums in which this object appears
+ * t - For loose objects, Unix ctime (seconds)
+ * t - object size
+ */
+#define OSTREE_REPO_LIST_OBJECTS_VARIANT_TYPE (G_VARIANT_TYPE ("(bastt)")
+
+gboolean ostree_repo_list_objects (OstreeRepo                  *self,
+                                   OstreeRepoListObjectsFlags   flags,
+                                   GHashTable                 **out_objects,
+                                   GCancellable                *cancellable,
+                                   GError                     **error);
 
 G_END_DECLS
 

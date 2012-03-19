@@ -64,7 +64,6 @@ typedef struct {
   guint n_dirmeta;
   guint n_dirtree;
   guint n_files;
-  GPtrArray *objects;
   gboolean had_error;
   GError **error;
 } OtRepackData;
@@ -133,56 +132,6 @@ create_compressor_subprocess (OtBuildRepackFile *self,
   return ret;
 }
 
-static void
-object_iter_callback (OstreeRepo    *repo,
-                      const char    *checksum,
-                      OstreeObjectType objtype,
-                      GFile         *objf,
-                      GFileInfo     *file_info,
-                      gpointer       user_data)
-{
-  gboolean ret = FALSE;
-  OtRepackData *data = user_data;
-  guint64 objsize;
-  GVariant *objdata = NULL;
-
-  switch (objtype)
-    {
-    case OSTREE_OBJECT_TYPE_COMMIT:
-      data->n_commits++;
-      break;
-    case OSTREE_OBJECT_TYPE_DIR_TREE:
-      data->n_dirtree++;
-      break;
-    case OSTREE_OBJECT_TYPE_DIR_META:
-      data->n_dirmeta++;
-      break;
-    case OSTREE_OBJECT_TYPE_RAW_FILE:
-    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT:
-      data->n_files++;
-      break;
-    case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META:
-      /* Counted under files */
-      break;
-    }
-
-  /* For archived content, only count regular files */
-  if (!(objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT
-        && g_file_info_get_file_type (file_info) != G_FILE_TYPE_REGULAR))
-    {
-      objsize = g_file_info_get_size (file_info);
-
-      objdata = g_variant_new ("(tsu)", objsize, checksum, (guint32)objtype);
-      g_ptr_array_add (data->objects, g_variant_ref_sink (objdata));
-      objdata = NULL; /* Transfer ownership */
-    }
-
-  ret = TRUE;
-  /* out: */
-  ot_clear_gvariant (&objdata);
-  data->had_error = !ret;
-}
-
 static gint
 compare_object_data_by_size (gconstpointer    ap,
                              gconstpointer    bp)
@@ -192,8 +141,8 @@ compare_object_data_by_size (gconstpointer    ap,
   guint64 a_size;
   guint64 b_size;
 
-  g_variant_get_child (a, 0, "t", &a_size);
-  g_variant_get_child (b, 0, "t", &b_size);
+  g_variant_get_child (a, 2, "t", &a_size);
+  g_variant_get_child (b, 2, "t", &b_size);
   if (a == b)
     return 0;
   else if (a > b)
@@ -315,7 +264,7 @@ create_pack_file (OtRepackData        *data,
       GOutputStream *write_pack_out;
       guchar entry_flags;
 
-      g_variant_get (object_data, "(t&su)", &objsize, &checksum, &objtype_u32);
+      g_variant_get (object_data, "(&sut)", &checksum, &objtype_u32, &objsize);
                      
       objtype = (OstreeObjectType) objtype_u32;
 
@@ -489,26 +438,49 @@ create_pack_file (OtRepackData        *data,
  * Returns: [Array of [Array of object data]].  Free with g_ptr_array_unref().
  */
 static GPtrArray *
-cluster_objects_stupidly (OtRepackData      *data)
+cluster_objects_stupidly (OtRepackData      *data,
+                          GHashTable        *objects)
 {
   GPtrArray *ret = NULL;
-  GPtrArray *objects = data->objects;
+  GPtrArray *object_list = NULL;
   guint i;
   guint64 current_size;
   guint current_offset;
+  GHashTableIter hash_iter;
+  gpointer key, value;
 
-  g_ptr_array_sort (data->objects, compare_object_data_by_size);
+  object_list = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
+
+  g_hash_table_iter_init (&hash_iter, objects);
+
+  while (g_hash_table_iter_next (&hash_iter, &key, &value))
+    {
+      GVariant *serialized_key = key;
+      GVariant *objdata = value;
+      const char *checksum;
+      OstreeObjectType objtype;
+      guint64 size;
+
+      ostree_object_name_deserialize (serialized_key, &checksum, &objtype);
+
+      g_variant_get_child (objdata, 3, "t", &size);
+
+      g_ptr_array_add (object_list,
+                       g_variant_new ("(sut)", checksum, objtype, size));
+    }
+
+  g_ptr_array_sort (object_list, compare_object_data_by_size);
 
   ret = g_ptr_array_new ();
 
   current_size = 0;
   current_offset = 0;
-  for (i = 0; i < objects->len; i++)
+  for (i = 0; i < object_list->len; i++)
     { 
-      GVariant *objdata = objects->pdata[i];
+      GVariant *objdata = object_list->pdata[i];
       guint64 objsize;
 
-      g_variant_get_child (objdata, 0, "t", &objsize);
+      g_variant_get_child (objdata, 2, "t", &objsize);
 
       if (current_size + objsize > data->pack_size)
         {
@@ -516,7 +488,7 @@ cluster_objects_stupidly (OtRepackData      *data)
           GPtrArray *current = g_ptr_array_new ();
           for (j = current_offset; j < i; j++)
             {
-              g_ptr_array_add (current, objects->pdata[j]);
+              g_ptr_array_add (current, object_list->pdata[j]);
             }
           g_ptr_array_add (ret, current);
           current_size = objsize;
@@ -532,6 +504,8 @@ cluster_objects_stupidly (OtRepackData      *data)
         }
     }
 
+  if (object_list)
+    g_ptr_array_unref (object_list);
   return ret;
 }
 
@@ -622,14 +596,17 @@ parse_compression_string (const char *compstr,
 gboolean
 ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
 {
+  gboolean ret = FALSE;
   GOptionContext *context;
   OtRepackData data;
-  gboolean ret = FALSE;
   OstreeRepo *repo = NULL;
+  GHashTable *objects = NULL;
   GCancellable *cancellable = NULL;
   guint i;
   guint64 total_size;
   GPtrArray *clusters = NULL;
+  GHashTableIter hash_iter;
+  gpointer key, value;
 
   memset (&data, 0, sizeof (data));
 
@@ -645,7 +622,6 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
 
   data.repo = repo;
   data.error = error;
-  data.objects = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
 
   if (!parse_size_spec_with_suffix (opt_pack_size, OT_DEFAULT_PACK_SIZE_BYTES, &data.pack_size, error))
     goto out;
@@ -655,33 +631,57 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   if (!parse_compression_string (opt_ext_compression, &data.ext_compression, error))
     goto out;
 
-  if (!ostree_repo_iter_objects (repo, object_iter_callback, &data, error))
+  if (!ostree_repo_list_objects (repo, OSTREE_REPO_LIST_OBJECTS_LOOSE, &objects, cancellable, error))
     goto out;
 
-  if (data.had_error)
-    goto out;
+  g_hash_table_iter_init (&hash_iter, objects);
+
+  total_size = 0;
+  while (g_hash_table_iter_next (&hash_iter, &key, &value))
+    {
+      GVariant *serialized_key = key;
+      GVariant *objdata = value;
+      const char *checksum;
+      OstreeObjectType objtype;
+      guint64 size;
+
+      ostree_object_name_deserialize (serialized_key, &checksum, &objtype);
+
+      switch (objtype)
+        {
+        case OSTREE_OBJECT_TYPE_COMMIT:
+          data.n_commits++;
+          break;
+        case OSTREE_OBJECT_TYPE_DIR_TREE:
+          data.n_dirtree++;
+          break;
+        case OSTREE_OBJECT_TYPE_DIR_META:
+          data.n_dirmeta++;
+          break;
+        case OSTREE_OBJECT_TYPE_RAW_FILE:
+        case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT:
+          data.n_files++;
+          break;
+        case OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META:
+          /* Counted under files */
+          break;
+        }
+
+      g_variant_get_child (objdata, 3, "t", &size);
+      
+      total_size += size;
+    }
 
   g_print ("Commits: %u\n", data.n_commits);
   g_print ("Tree contents: %u\n", data.n_dirtree);
   g_print ("Tree meta: %u\n", data.n_dirmeta);
   g_print ("Files: %u\n", data.n_files);
-
-  total_size = 0;
-  for (i = 0; i < data.objects->len; i++)
-    {
-      GVariant *objdata = data.objects->pdata[i];
-      guint64 size;
-      
-      g_variant_get_child (objdata, 0, "t", &size);
-      
-      total_size += size;
-    }
   g_print ("Total size: %" G_GUINT64_FORMAT "\n", total_size);
 
   g_print ("\n");
   g_print ("Using pack size: %" G_GUINT64_FORMAT "\n", data.pack_size);
 
-  clusters = cluster_objects_stupidly (&data);
+  clusters = cluster_objects_stupidly (&data, objects);
 
   g_print ("Going to create %u packfiles\n", clusters->len);
 
@@ -705,5 +705,7 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   g_clear_object (&repo);
   if (clusters)
     g_ptr_array_unref (clusters);
+  if (objects)
+    g_hash_table_unref (objects);
   return ret;
 }

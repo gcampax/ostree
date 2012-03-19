@@ -123,39 +123,36 @@ checksum_archived_file (OtFsckData   *data,
   return ret;
 }
 
-static void
-object_iter_callback (OstreeRepo    *repo,
-                      const char    *exp_checksum,
-                      OstreeObjectType objtype,
-                      GFile         *objf,
-                      GFileInfo     *file_info,
-                      gpointer       user_data)
+static gboolean
+fsck_loose_object (OtFsckData    *data,
+                   const char    *exp_checksum,
+                   OstreeObjectType objtype,
+                   GCancellable   *cancellable,
+                   GError        **error)
 {
-  OtFsckData *data = user_data;
+  gboolean ret = FALSE;
+  GFile *objf = NULL;
   GChecksum *real_checksum = NULL;
-  GError *error = NULL;
 
-  /* nlinks = g_file_info_get_attribute_uint32 (file_info, "unix::nlink");
-     if (nlinks < 2 && !quiet)
-     g_printerr ("note: floating object: %s\n", path); */
+  objf = ostree_repo_get_object_path (data->repo, exp_checksum, objtype);
 
   if (objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META)
     {
       if (!g_str_has_suffix (ot_gfile_get_path_cached (objf), ".archive-meta"))
         {
-          g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                        "Invalid archive filename '%s'",
                        ot_gfile_get_path_cached (objf));
           goto out;
         }
-      if (!checksum_archived_file (data, exp_checksum, objf, &real_checksum, &error))
+      if (!checksum_archived_file (data, exp_checksum, objf, &real_checksum, error))
         goto out;
     }
   else if (objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT)
     ; /* Handled above */
   else
     {
-      if (!ostree_checksum_file (objf, objtype, &real_checksum, NULL, &error))
+      if (!ostree_checksum_file (objf, objtype, &real_checksum, NULL, error))
         goto out;
     }
 
@@ -170,13 +167,10 @@ object_iter_callback (OstreeRepo    *repo,
 
   data->n_objects++;
 
+  ret = TRUE;
  out:
   ot_clear_checksum (&real_checksum);
-  if (error != NULL)
-    {
-      g_printerr ("%s\n", error->message);
-      g_clear_error (&error);
-    }
+  return ret;
 }
 
 gboolean
@@ -186,6 +180,10 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
   OtFsckData data;
   gboolean ret = FALSE;
   OstreeRepo *repo = NULL;
+  GHashTable *objects = NULL;
+  GCancellable *cancellable = NULL;
+  GHashTableIter hash_iter;
+  gpointer key, value;
 
   context = g_option_context_new ("- Check the repository for consistency");
   g_option_context_add_main_entries (context, options, NULL);
@@ -201,8 +199,30 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
   data.n_objects = 0;
   data.had_error = FALSE;
 
-  if (!ostree_repo_iter_objects (repo, object_iter_callback, &data, error))
+  if (!ostree_repo_list_objects (repo, OSTREE_REPO_LIST_OBJECTS_ALL,
+                                 &objects, cancellable, error))
     goto out;
+  
+  g_hash_table_iter_init (&hash_iter, objects);
+
+  while (g_hash_table_iter_next (&hash_iter, &key, &value))
+    {
+      GVariant *serialized_key = key;
+      GVariant *objdata = value;
+      const char *checksum;
+      OstreeObjectType objtype;
+      gboolean is_loose;
+
+      ostree_object_name_deserialize (serialized_key, &checksum, &objtype);
+
+      g_variant_get_child (objdata, 0, "b", &is_loose);
+
+      if (is_loose)
+        {
+          if (!fsck_loose_object (&data, checksum, objtype, cancellable, error))
+            goto out;
+        }
+    }
 
   if (data.had_error)
     {
@@ -218,5 +238,7 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
   if (context)
     g_option_context_free (context);
   g_clear_object (&repo);
+  if (objects)
+    g_hash_table_unref (objects);
   return ret;
 }

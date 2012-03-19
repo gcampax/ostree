@@ -584,6 +584,23 @@ ostree_object_from_string (const char *str,
   *out_objtype = ostree_object_type_from_string (dot + 1);
 }
 
+GVariant *
+ostree_object_name_serialize (const char *checksum,
+                              OstreeObjectType objtype)
+{
+  return g_variant_new ("(su)", checksum, (guint32)objtype);
+}
+
+void
+ostree_object_name_deserialize (GVariant         *variant,
+                                const char      **out_checksum,
+                                OstreeObjectType *out_objtype)
+{
+  guint32 objtype_u32;
+  g_variant_get (variant, "(&su)", out_checksum, &objtype_u32);
+  *out_objtype = (OstreeObjectType)objtype_u32;
+}
+
 char *
 ostree_get_relative_object_path (const char *checksum,
                                  OstreeObjectType type)
