@@ -109,9 +109,9 @@ typedef enum {
  * s - OSTPACKINDEX
  * u - Version
  * a{sv} - Metadata
- * a(st) - (checksum, offset into packfile)
+ * a(sut) - (checksum, objtype, offset into packfile)
  */
-#define OSTREE_PACK_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(st))")
+#define OSTREE_PACK_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(sut))")
 
 typedef enum {
   OSTREE_PACK_FILE_ENTRY_FLAG_NONE = 0,
@@ -125,13 +125,14 @@ typedef enum {
  * u - number of entries
  *
  * Repeating tuple of:
+ * <padding to alignment of 4>
+ * <32 bit BE integer containing variant length>
  * <padding to alignment of 8>
- * (yst) - Contents (flags, checksum, objtype, length)
- * <raw data>
+ * ( tuys ) - content_length, objtype, flags, checksum
  */
 #define OSTREE_PACK_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}t)")
 
-#define OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT G_VARIANT_TYPE ("(yst)")
+#define OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT G_VARIANT_TYPE ("(ysut)")
 
 gboolean ostree_validate_checksum_string (const char *sha256,
                                           GError    **error);

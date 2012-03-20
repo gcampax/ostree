@@ -35,6 +35,7 @@
 #define OT_GZIP_COMPRESSION_LEVEL (8)
 
 static gboolean opt_analyze_only;
+static gboolean opt_ls;
 static char* opt_pack_size;
 static char* opt_int_compression;
 static char* opt_ext_compression;
@@ -50,6 +51,7 @@ static GOptionEntry options[] = {
   { "internal-compression", 0, 0, G_OPTION_ARG_STRING, &opt_int_compression, "Compress objects using COMPRESSION", "COMPRESSION" },
   { "external-compression", 0, 0, G_OPTION_ARG_STRING, &opt_ext_compression, "Compress entire packfiles using COMPRESSION", "COMPRESSION" },
   { "analyze-only", 0, 0, G_OPTION_ARG_NONE, &opt_analyze_only, "Just analyze current state", NULL },
+  { "ls", 0, 0, G_OPTION_ARG_NONE, &opt_ls, "Print packfiles", NULL },
   { NULL }
 };
 
@@ -74,64 +76,6 @@ typedef struct {
   GPid compress_child_pid;
 } OtBuildRepackFile;
 
-static GPtrArray *
-get_xz_args (void)
-{
-  GPtrArray *ret = g_ptr_array_new ();
-  
-  g_ptr_array_add (ret, "xz");
-  g_ptr_array_add (ret, "--memlimit-compress=512M");
-
-  return ret;
-}
-
-static void
-compressor_child_setup (gpointer user_data)
-{
-  int stdout_fd = GPOINTER_TO_INT (user_data);
-
-  if (dup2 (stdout_fd, 1) < 0)
-    g_assert_not_reached ();
-  (void) close (stdout_fd);
-}
-
-static gboolean
-create_compressor_subprocess (OtBuildRepackFile *self,
-                              GPtrArray         *compressor_argv,
-                              GFile             *destfile,
-                              GOutputStream    **out_output,
-                              GCancellable      *cancellable,
-                              GError           **error)
-{
-  gboolean ret = FALSE;
-  GOutputStream *ret_output = NULL;
-  int stdin_pipe_fd;
-  int target_stdout_fd;
-
-  target_stdout_fd = open (ot_gfile_get_path_cached (destfile), O_WRONLY);
-  if (target_stdout_fd < 0)
-    {
-      ot_util_set_error_from_errno (error, errno);
-      goto out;
-    }
-
-  if (!g_spawn_async_with_pipes (NULL, (char**)compressor_argv->pdata, NULL,
-                                 G_SPAWN_SEARCH_PATH, NULL, NULL,
-                                 &self->compress_child_pid, &stdin_pipe_fd,
-                                 compressor_child_setup, GINT_TO_POINTER (target_stdout_fd), error))
-    goto out;
-  
-  (void) close (target_stdout_fd);
-
-  ret_output = g_unix_output_stream_new (stdin_pipe_fd, TRUE);
-
-  ret = TRUE;
-  ot_transfer_out_value (out_output, &ret_output);
- out:
-  g_clear_object (&ret_output);
-  return ret;
-}
-
 static gint
 compare_object_data_by_size (gconstpointer    ap,
                              gconstpointer    bp)
@@ -152,37 +96,88 @@ compare_object_data_by_size (gconstpointer    ap,
 }
 
 static gboolean
-write_aligned_variant (GOutputStream      *output,
-                       GVariant           *variant,
-                       GChecksum          *checksum,
-                       guint64            *inout_offset,
-                       GCancellable       *cancellable,
-                       GError            **error)
+write_bytes_update_checksum (GOutputStream *output,
+                             gconstpointer  bytes,
+                             gsize          len,
+                             GChecksum     *checksum,
+                             guint64       *inout_offset,
+                             GCancellable  *cancellable,
+                             GError       **error)
+{
+  gboolean ret = FALSE;
+  gsize bytes_written;
+
+  if (len > 0)
+    {
+      g_checksum_update (checksum, (guchar*) bytes, len);
+      if (!g_output_stream_write_all (output, bytes, len, &bytes_written,
+                                      cancellable, error))
+        goto out;
+      g_assert (bytes_written == len);
+      *inout_offset += len;
+    }
+  
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+write_padding (GOutputStream    *output,
+               guint             alignment,
+               GChecksum        *checksum,
+               guint64          *inout_offset,
+               GCancellable     *cancellable,
+               GError          **error)
 {
   gboolean ret = FALSE;
   guint padding;
-  gsize bytes_written;
   char padding_nuls[7] = {0, 0, 0, 0, 0, 0, 0};
 
-  padding = 8 - ((*inout_offset) & 7);
-  
-  if (padding > 0)
-    {
-      g_checksum_update (checksum, (guchar*) padding_nuls, padding);
-      if (!g_output_stream_write_all (output, padding_nuls, padding, &bytes_written,
-                                      cancellable, error))
-        goto out;
-      g_assert (bytes_written == padding);
-      *inout_offset += padding;
-    }
+  if (alignment == 8)
+    padding = 8 - ((*inout_offset) & 7);
+  else
+    padding = 4 - ((*inout_offset) & 3);
 
-  g_checksum_update (checksum, (guchar*) g_variant_get_data (variant),
-                     g_variant_get_size (variant));
-  if (!g_output_stream_write_all (output, g_variant_get_data (variant),
-                                  g_variant_get_size (variant), &bytes_written,
-                                  cancellable, error))
+  if (!write_bytes_update_checksum (output, (guchar*)padding_nuls, padding,
+                                    checksum, inout_offset, cancellable, error))
     goto out;
-  *inout_offset += bytes_written;
+  
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+write_variant_with_size (GOutputStream      *output,
+                         GVariant           *variant,
+                         GChecksum          *checksum,
+                         guint64            *inout_offset,
+                         GCancellable       *cancellable,
+                         GError            **error)
+{
+  gboolean ret = FALSE;
+  guint64 variant_size;
+  guint32 variant_size_u32_be;
+
+  g_assert ((*inout_offset & 7) == 0);
+
+  /* Write variant size */
+  variant_size = g_variant_get_size (variant);
+  g_assert (variant_size < G_MAXUINT32);
+  variant_size_u32_be = GUINT32_TO_BE((guint32) variant_size);
+
+  if (!write_bytes_update_checksum (output, (guchar*)&variant_size_u32_be, 4,
+                                    checksum, inout_offset, cancellable, error))
+    goto out;
+
+  /* Pad to offset of 8, write variant */
+  if (!write_padding (output, 8, checksum, inout_offset, cancellable, error))
+    goto out;
+  if (!write_bytes_update_checksum (output, g_variant_get_data (variant),
+                                    variant_size, checksum,
+                                    inout_offset, cancellable, error))
+    goto out;
 
   ret = TRUE;
  out:
@@ -240,7 +235,7 @@ create_pack_file (OtRepackData        *data,
   offset = 0;
   pack_checksum = g_checksum_new (G_CHECKSUM_SHA256);
 
-  g_variant_builder_init (&index_content_builder, G_VARIANT_TYPE ("a(st)"));
+  g_variant_builder_init (&index_content_builder, G_VARIANT_TYPE ("a(sut)"));
   index_content_builder_initialized = TRUE;
 
   pack_header = g_variant_new ("(su@a{sv}u)",
@@ -248,25 +243,32 @@ create_pack_file (OtRepackData        *data,
                                g_variant_new_array (G_VARIANT_TYPE ("{sv}"), NULL, 0),
                                objects->len);
 
-  if (!write_aligned_variant (pack_out, pack_header, pack_checksum, &offset,
-                              cancellable, error))
+  if (!write_variant_with_size (pack_out, pack_header, pack_checksum, &offset,
+                                cancellable, error))
     goto out;
   
   for (i = 0; i < objects->len; i++)
     {
       GVariant *object_data = objects->pdata[i];
-      guint64 objsize;
       const char *checksum;
       guint32 objtype_u32;
       OstreeObjectType objtype;
       char buf[4096];
       guint64 obj_bytes_written;
+      guint64 expected_objsize;
+      guint64 objsize;
       GOutputStream *write_pack_out;
       guchar entry_flags;
 
-      g_variant_get (object_data, "(&sut)", &checksum, &objtype_u32, &objsize);
+      g_variant_get (object_data, "(&sut)", &checksum, &objtype_u32, &expected_objsize);
                      
       objtype = (OstreeObjectType) objtype_u32;
+
+      if (!write_padding (pack_out, 4, pack_checksum, &offset, cancellable, error))
+        goto out;
+
+      /* offset points to aligned header size */
+      g_variant_builder_add (&index_content_builder, "(sut)", checksum, (guint32)objtype, offset);
 
       ot_clear_gvariant (&object_header);
       entry_flags = 0;
@@ -284,12 +286,6 @@ create_pack_file (OtRepackData        *data,
             }
         }
 
-      object_header = g_variant_new ("(yst)", GUINT32_TO_BE (entry_flags), checksum, (guint32)objtype, objsize);
-
-      if (!write_aligned_variant (pack_out, object_header, pack_checksum,
-                                  &offset, cancellable, error))
-        goto out;
-      
       g_clear_object (&object_path);
       object_path = ostree_repo_get_object_path (data->repo, checksum, objtype);
       
@@ -298,6 +294,25 @@ create_pack_file (OtRepackData        *data,
       if (!object_input)
         goto out;
 
+      g_clear_object (&object_file_info);
+      object_file_info = g_file_input_stream_query_info (object_input, OSTREE_GIO_FAST_QUERYINFO, cancellable, error);
+      if (!object_file_info)
+        goto out;
+
+      objsize = g_file_info_get_attribute_uint64 (object_file_info, G_FILE_ATTRIBUTE_STANDARD_SIZE);
+
+      g_assert_cmpint (objsize, ==, expected_objsize);
+
+      ot_clear_gvariant (&object_header);
+      object_header = g_variant_new ("(tuys)", GUINT64_TO_BE (objsize),
+                                     GUINT32_TO_BE ((guint32)objtype),
+                                     GUINT32_TO_BE (entry_flags),
+                                     checksum);
+
+      if (!write_variant_with_size (pack_out, object_header, pack_checksum,
+                                    &offset, cancellable, error))
+        goto out;
+      
       if (data->int_compression != OT_COMPRESSION_NONE)
         {
           g_clear_object (&compressor);
@@ -345,7 +360,6 @@ create_pack_file (OtRepackData        *data,
 
       g_assert_cmpint (obj_bytes_written, ==, objsize);
 
-      g_variant_builder_add (&index_content_builder, "(st)", checksum, offset);
     }
   
   if (!g_output_stream_close (pack_out, cancellable, error))
@@ -370,7 +384,7 @@ create_pack_file (OtRepackData        *data,
     }
   g_clear_object (&pack_temppath);
 
-  index_content = g_variant_new ("(su@a{sv}@a(st))",
+  index_content = g_variant_new ("(su@a{sv}@a(sut))",
                                  "OSTPACKINDEX", GUINT32_TO_BE(0),
                                  g_variant_new_array (G_VARIANT_TYPE ("{sv}"), NULL, 0),
                                  g_variant_builder_end (&index_content_builder));
@@ -432,22 +446,29 @@ create_pack_file (OtRepackData        *data,
 
 /**
  * cluster_objects_stupidly:
+ * @objects: Map from serialized object name to objdata
+ * @out_clusters: (out): [Array of [Array of object data]].  Free with g_ptr_array_unref().
  *
- * Just sorts by size currently.
- *
- * Returns: [Array of [Array of object data]].  Free with g_ptr_array_unref().
+ * Just sorts by size currently.  Also filters out non-regular object
+ * content.
  */
-static GPtrArray *
+static gboolean
 cluster_objects_stupidly (OtRepackData      *data,
-                          GHashTable        *objects)
+                          GHashTable        *objects,
+                          GPtrArray        **out_clusters,
+                          GCancellable      *cancellable,
+                          GError           **error)
 {
-  GPtrArray *ret = NULL;
+  gboolean ret = FALSE;
+  GPtrArray *ret_clusters = NULL;
   GPtrArray *object_list = NULL;
   guint i;
   guint64 current_size;
   guint current_offset;
   GHashTableIter hash_iter;
   gpointer key, value;
+  GFile *object_path = NULL;
+  GFileInfo *object_info = NULL;
 
   object_list = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
 
@@ -456,22 +477,40 @@ cluster_objects_stupidly (OtRepackData      *data,
   while (g_hash_table_iter_next (&hash_iter, &key, &value))
     {
       GVariant *serialized_key = key;
-      GVariant *objdata = value;
       const char *checksum;
       OstreeObjectType objtype;
       guint64 size;
 
       ostree_object_name_deserialize (serialized_key, &checksum, &objtype);
 
-      g_variant_get_child (objdata, 3, "t", &size);
+      g_clear_object (&object_path);
+      object_path = ostree_repo_get_object_path (data->repo, checksum, objtype);
+
+      if (objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META)
+        {
+          /* Counted under files */
+          continue;
+        }
+
+      g_clear_object (&object_info);
+      object_info = g_file_query_info (object_path, OSTREE_GIO_FAST_QUERYINFO,
+                                       G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+                                       cancellable, error);
+      if (!object_info)
+        goto out;
+
+      if (g_file_info_get_file_type (object_info) != G_FILE_TYPE_REGULAR)
+        continue;
+
+      size = g_file_info_get_attribute_uint64 (object_info, G_FILE_ATTRIBUTE_STANDARD_SIZE);
 
       g_ptr_array_add (object_list,
-                       g_variant_new ("(sut)", checksum, objtype, size));
+                       g_variant_ref_sink (g_variant_new ("(sut)", checksum, objtype, size)));
     }
 
   g_ptr_array_sort (object_list, compare_object_data_by_size);
 
-  ret = g_ptr_array_new ();
+  ret_clusters = g_ptr_array_new ();
 
   current_size = 0;
   current_offset = 0;
@@ -488,9 +527,9 @@ cluster_objects_stupidly (OtRepackData      *data,
           GPtrArray *current = g_ptr_array_new ();
           for (j = current_offset; j < i; j++)
             {
-              g_ptr_array_add (current, object_list->pdata[j]);
+              g_ptr_array_add (current, g_variant_ref (object_list->pdata[j]));
             }
-          g_ptr_array_add (ret, current);
+          g_ptr_array_add (ret_clusters, current);
           current_size = objsize;
           current_offset = i;
         }
@@ -504,6 +543,9 @@ cluster_objects_stupidly (OtRepackData      *data,
         }
     }
 
+  ret = TRUE;
+  ot_transfer_out_value (out_clusters, &ret_clusters);
+ out:
   if (object_list)
     g_ptr_array_unref (object_list);
   return ret;
@@ -593,6 +635,14 @@ parse_compression_string (const char *compstr,
   return ret;
 }
 
+static gboolean
+do_ls (OtRepackData  *data,
+       GCancellable  *cancellable,
+       GError       **error)
+{
+  return FALSE;
+}
+
 gboolean
 ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
 {
@@ -603,7 +653,6 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   GHashTable *objects = NULL;
   GCancellable *cancellable = NULL;
   guint i;
-  guint64 total_size;
   GPtrArray *clusters = NULL;
   GHashTableIter hash_iter;
   gpointer key, value;
@@ -636,14 +685,11 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
 
   g_hash_table_iter_init (&hash_iter, objects);
 
-  total_size = 0;
   while (g_hash_table_iter_next (&hash_iter, &key, &value))
     {
       GVariant *serialized_key = key;
-      GVariant *objdata = value;
       const char *checksum;
       OstreeObjectType objtype;
-      guint64 size;
 
       ostree_object_name_deserialize (serialized_key, &checksum, &objtype);
 
@@ -666,35 +712,39 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
           /* Counted under files */
           break;
         }
-
-      g_variant_get_child (objdata, 3, "t", &size);
-      
-      total_size += size;
     }
 
   g_print ("Commits: %u\n", data.n_commits);
   g_print ("Tree contents: %u\n", data.n_dirtree);
   g_print ("Tree meta: %u\n", data.n_dirmeta);
   g_print ("Files: %u\n", data.n_files);
-  g_print ("Total size: %" G_GUINT64_FORMAT "\n", total_size);
 
   g_print ("\n");
   g_print ("Using pack size: %" G_GUINT64_FORMAT "\n", data.pack_size);
 
-  clusters = cluster_objects_stupidly (&data, objects);
-
-  g_print ("Going to create %u packfiles\n", clusters->len);
-
-  for (i = 0; i < clusters->len; i++)
+  if (opt_ls)
     {
-      GPtrArray *cluster = clusters->pdata[i];
-      
-      g_print ("%u: %u objects\n", i, cluster->len);
+      if (!do_ls (&data, cancellable, error))
+        goto out;
+    }
+  else
+    {
+      if (!cluster_objects_stupidly (&data, objects, &clusters, cancellable, error))
+        goto out;
 
-      if (!opt_analyze_only)
+      g_print ("Going to create %u packfiles\n", clusters->len);
+
+      for (i = 0; i < clusters->len; i++)
         {
-          if (!create_pack_file (&data, cluster, cancellable, error))
-            goto out;
+          GPtrArray *cluster = clusters->pdata[i];
+      
+          g_print ("%u: %u objects\n", i, cluster->len);
+
+          if (!opt_analyze_only)
+            {
+              if (!create_pack_file (&data, cluster, cancellable, error))
+                goto out;
+            }
         }
     }
 

@@ -70,7 +70,7 @@ ostree_builtin_init (int argc, char **argv, GFile *repo_path, GError **error)
     goto out;
 
   g_clear_object (&grandchild);
-  grandchild = g_file_get_child (child, "packs");
+  grandchild = g_file_get_child (child, "pack");
   if (!g_file_make_directory (grandchild, NULL, error))
     goto out;
 

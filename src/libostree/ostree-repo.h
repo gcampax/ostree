@@ -141,6 +141,12 @@ gboolean      ostree_repo_load_variant (OstreeRepo  *self,
                                         GVariant     **out_variant,
                                         GError       **error);
 
+gboolean      ostree_repo_load_pack_index (OstreeRepo    *self,
+                                           const char    *sha256, 
+                                           GVariant     **out_variant,
+                                           GCancellable  *cancellable,
+                                           GError       **error);
+
 typedef enum {
   OSTREE_REPO_COMMIT_FILTER_ALLOW,
   OSTREE_REPO_COMMIT_FILTER_SKIP
@@ -237,16 +243,19 @@ typedef enum {
  *
  * b - %TRUE if object is available "loose"
  * as - List of pack file checksums in which this object appears
- * t - For loose objects, Unix ctime (seconds)
- * t - object size
  */
-#define OSTREE_REPO_LIST_OBJECTS_VARIANT_TYPE (G_VARIANT_TYPE ("(bastt)")
+#define OSTREE_REPO_LIST_OBJECTS_VARIANT_TYPE (G_VARIANT_TYPE ("(bas)")
 
 gboolean ostree_repo_list_objects (OstreeRepo                  *self,
                                    OstreeRepoListObjectsFlags   flags,
                                    GHashTable                 **out_objects,
                                    GCancellable                *cancellable,
                                    GError                     **error);
+
+gboolean ostree_repo_list_pack_indexes (OstreeRepo              *self,
+                                        GPtrArray              **out_indexes,
+                                        GCancellable            *cancellable,
+                                        GError                 **error);
 
 G_END_DECLS
 
