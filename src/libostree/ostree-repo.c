@@ -344,7 +344,6 @@ ostree_repo_resolve_rev (OstreeRepo     *self,
   GFile *origindir = NULL;
   GError *temp_error = NULL;
   GVariant *commit = NULL;
-  GPtrArray *components = NULL;
   
   g_return_val_if_fail (rev != NULL, FALSE);
 
