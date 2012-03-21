@@ -2307,19 +2307,6 @@ ostree_repo_commit_modifier_unref (OstreeRepoCommitModifier *modifier)
   return;
 }
 
-static guint
-hash_list_object_key (gconstpointer a)
-{
-  GVariant *variant = (gpointer)a;
-  const char *checksum;
-  OstreeObjectType objtype;
-  gint objtype_int;
-  
-  ostree_object_name_deserialize (variant, &checksum, &objtype);
-  objtype_int = (gint) objtype;
-  return g_str_hash (checksum) + g_int_hash (&objtype_int);
-}
-
 static gboolean
 list_loose_object_dir (OstreeRepo             *self,
                        GFile                  *dir,
@@ -3028,7 +3015,9 @@ ostree_repo_list_objects (OstreeRepo                  *self,
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
   g_return_val_if_fail (priv->inited, FALSE);
   
-  ret_objects = g_hash_table_new_full (hash_list_object_key, g_variant_equal, (GDestroyNotify) g_variant_unref, (GDestroyNotify) g_variant_unref);
+  ret_objects = g_hash_table_new_full (ostree_hash_object_name, g_variant_equal,
+                                       (GDestroyNotify) g_variant_unref,
+                                       (GDestroyNotify) g_variant_unref);
 
   if (flags & OSTREE_REPO_LIST_OBJECTS_ALL)
     flags |= (OSTREE_REPO_LIST_OBJECTS_LOOSE | OSTREE_REPO_LIST_OBJECTS_PACKED);

@@ -657,23 +657,28 @@ parse_compression_string (const char *compstr,
 }
 
 static gboolean
-do_stats (OtRepackData  *data,
-          GHashTable    *objects,
-          GCancellable  *cancellable,
-          GError       **error)
+do_stats_gather_loose (OtRepackData  *data,
+                       GHashTable    *objects,
+                       GHashTable   **out_loose,
+                       GCancellable  *cancellable,
+                       GError       **error)
 {
   gboolean ret = FALSE;
+  GHashTable *ret_loose = NULL;
   guint n_loose = 0;
   guint n_loose_and_packed = 0;
   guint n_packed = 0;
   guint n_dup_packed = 0;
-  guint n_multiple_packs = 0;
   guint n_commits = 0;
   guint n_dirmeta = 0;
   guint n_dirtree = 0;
   guint n_files = 0;
   GHashTableIter hash_iter;
   gpointer key, value;
+
+  ret_loose = g_hash_table_new_full (ostree_hash_object_name, g_variant_equal,
+                                     (GDestroyNotify) g_variant_unref,
+                                     NULL);
 
   g_hash_table_iter_init (&hash_iter, objects);
   while (g_hash_table_iter_next (&hash_iter, &key, &value))
@@ -695,7 +700,11 @@ do_stats (OtRepackData  *data,
       if (is_loose && is_packed)
         n_loose_and_packed++;
       else if (is_loose)
-        n_loose++;
+        {
+          GVariant *copy = g_variant_ref (serialized_key);
+          g_hash_table_replace (ret_loose, copy, copy);
+          n_loose++;
+        }
       else if (g_variant_n_children (pack_array) > 0)
         n_dup_packed++;
       else
@@ -728,12 +737,15 @@ do_stats (OtRepackData  *data,
   g_print ("Files: %u\n", n_files);
   g_print ("\n");
   g_print ("Loose+packed objects: %u\n", n_loose_and_packed);
-  g_print ("Loose objects: %u\n", n_loose);
+  g_print ("Loose-only objects: %u\n", n_loose);
   g_print ("Duplicate packed objects: %u\n", n_dup_packed);
-  g_print ("Packed objects: %u\n", n_packed);
+  g_print ("Packed-only objects: %u\n", n_packed);
 
   ret = TRUE;
+  ot_transfer_out_value (out_loose, &ret_loose);
  /* out: */
+  if (ret_loose)
+    g_hash_table_unref (ret_loose);
   return ret;
 }
 
@@ -749,8 +761,6 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   guint i;
   GPtrArray *clusters = NULL;
   GHashTable *loose_objects = NULL;
-  GHashTableIter hash_iter;
-  gpointer key, value;
 
   memset (&data, 0, sizeof (data));
 
@@ -778,16 +788,19 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   if (!ostree_repo_list_objects (repo, OSTREE_REPO_LIST_OBJECTS_ALL, &objects, cancellable, error))
     goto out;
 
-  if (!do_stats (&data, objects, cancellable, error))
+  if (!do_stats_gather_loose (&data, objects, &loose_objects, cancellable, error))
     goto out;
 
   g_print ("\n");
   g_print ("Using pack size: %" G_GUINT64_FORMAT "\n", data.pack_size);
 
-  if (!cluster_objects_stupidly (&data, objects, &clusters, cancellable, error))
+  if (!cluster_objects_stupidly (&data, loose_objects, &clusters, cancellable, error))
     goto out;
   
-  g_print ("Going to create %u packfiles\n", clusters->len);
+  if (clusters->len > 0)
+    g_print ("Going to create %u packfiles\n", clusters->len);
+  else
+    g_print ("Nothing to do\n");
   
   for (i = 0; i < clusters->len; i++)
     {
@@ -809,6 +822,8 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   g_clear_object (&repo);
   if (clusters)
     g_ptr_array_unref (clusters);
+  if (loose_objects)
+    g_hash_table_unref (loose_objects);
   if (objects)
     g_hash_table_unref (objects);
   return ret;

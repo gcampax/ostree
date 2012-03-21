@@ -144,6 +144,8 @@ const char * ostree_object_type_to_string (OstreeObjectType objtype);
 
 OstreeObjectType ostree_object_type_from_string (const char *str);
 
+guint ostree_hash_object_name (gconstpointer a);
+
 GVariant *ostree_object_name_serialize (const char *checksum,
                                         OstreeObjectType objtype);
 

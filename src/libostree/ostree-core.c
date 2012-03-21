@@ -584,6 +584,19 @@ ostree_object_from_string (const char *str,
   *out_objtype = ostree_object_type_from_string (dot + 1);
 }
 
+guint
+ostree_hash_object_name (gconstpointer a)
+{
+  GVariant *variant = (gpointer)a;
+  const char *checksum;
+  OstreeObjectType objtype;
+  gint objtype_int;
+  
+  ostree_object_name_deserialize (variant, &checksum, &objtype);
+  objtype_int = (gint) objtype;
+  return g_str_hash (checksum) + g_int_hash (&objtype_int);
+}
+
 GVariant *
 ostree_object_name_serialize (const char *checksum,
                               OstreeObjectType objtype)
