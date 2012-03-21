@@ -70,6 +70,7 @@ struct _OstreeRepoPrivate {
   OstreeRepoMode mode;
 
   GHashTable *pack_index_mappings;
+  GHashTable *pack_data_mappings;
 
   GHashTable *pending_transaction;
 };
@@ -89,6 +90,7 @@ ostree_repo_finalize (GObject *object)
   g_clear_object (&priv->pack_dir);
   g_clear_object (&priv->config_file);
   g_hash_table_destroy (priv->pack_index_mappings);
+  g_hash_table_destroy (priv->pack_data_mappings);
   g_hash_table_destroy (priv->pending_transaction);
   if (priv->config)
     g_key_file_free (priv->config);
@@ -193,7 +195,10 @@ ostree_repo_init (OstreeRepo *self)
   
   priv->pack_index_mappings = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                      g_free,
-                                                     (GDestroyNotify)g_mapped_file_unref);
+                                                     (GDestroyNotify)g_variant_unref);
+  priv->pack_data_mappings = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                    g_free,
+                                                    (GDestroyNotify)g_mapped_file_unref);
   priv->pending_transaction = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                      g_free,
                                                      NULL);
@@ -2529,26 +2534,6 @@ list_loose_objects (OstreeRepo                     *self,
   return ret;
 }
 
-static GFile *
-get_pack_data_for_index (GFile *index)
-{
-  const char *basename;
-  GString *name = g_string_new ("");
-  GFile *ret;
-  GFile *parent;
-
-  basename = ot_gfile_get_basename_cached (index);
-  g_assert (g_str_has_suffix (basename, ".index"));
-  g_string_append_len (name, basename, strlen (basename) - 5);
-  g_string_append (name, "data");
-
-  parent = g_file_get_parent (index);
-  ret = g_file_get_child (parent, name->str);
-  g_object_unref (parent);
-  g_string_free (name, TRUE);
-  return ret;
-}
-
 static char *
 get_checksum_from_pack_name (const char *name)
 {
@@ -2560,7 +2545,7 @@ get_checksum_from_pack_name (const char *name)
   dot = strrchr (name, '.');
   g_assert (dot);
 
-  g_assert_cmpint (dot - dash, ==, 64);
+  g_assert_cmpint (dot - (dash + 1), ==, 64);
   
   return g_strndup (dash + 1, 64);
 }
@@ -2580,8 +2565,8 @@ get_pack_index_path (OstreeRepo *self,
 }
 
 static GFile *
-get_pack_content_path (OstreeRepo *self,
-                       const char *checksum)
+get_pack_data_path (OstreeRepo *self,
+                    const char *checksum)
 {
   char *name;
   GFile *ret;
@@ -2626,6 +2611,258 @@ ostree_repo_load_pack_index (OstreeRepo    *self,
  out:
   g_clear_object (&path);
   ot_clear_gvariant (&ret_variant);
+  return ret;
+}
+
+/**
+ * ostree_repo_map_pack_file:
+ * @self:
+ * @sha256: Checksum of pack file
+ * @out_data: (out): Pointer to pack file data
+ * @cancellable:
+ * @error:
+ *
+ * Ensure that the given pack file is mapped into
+ * memory.
+ */
+gboolean
+ostree_repo_map_pack_file (OstreeRepo    *self,
+                           const char    *sha256,
+                           guchar       **out_data,
+                           guint64       *out_len,
+                           GCancellable  *cancellable,
+                           GError       **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GMappedFile *map;
+  gpointer ret_data;
+  guint64 ret_len;
+  GFile *path = NULL;
+
+  map = g_hash_table_lookup (priv->pack_data_mappings, sha256);
+  if (map == NULL)
+    {
+      path = get_pack_data_path (self, sha256);
+
+      map = g_mapped_file_new (ot_gfile_get_path_cached (path), FALSE, error);
+      if (!map)
+        goto out;
+
+      g_hash_table_insert (priv->pack_data_mappings, g_strdup (sha256), map);
+      ret_data = g_mapped_file_get_contents (map);
+    }
+
+  ret_data = g_mapped_file_get_contents (map);
+  ret_len = (guint64)g_mapped_file_get_length (map);
+
+  ret = TRUE;
+  ot_transfer_out_value (out_data, &ret_data);
+  if (out_len)
+    *out_len = ret_len;
+ out:
+  g_clear_object (&path);
+  if (ret_data)
+    g_mapped_file_unref (ret_data);
+  return ret;
+}
+
+static gboolean
+bsearch_in_pack_index (GVariant   *index_contents,
+                       const char *checksum,
+                       OstreeObjectType objtype,
+                       guint64    *out_offset)
+{
+  gsize n;
+  gsize i;
+  gsize m;
+  guint32 target_objtype = (guint32) objtype;
+
+  i = 0;
+  n = g_variant_n_children (index_contents) - 1;
+  m = 0;
+
+  while (i <= n)
+    {
+      const char *cur_checksum;
+      guint32 cur_objtype;
+      guint64 cur_offset;
+      int c;
+
+      m = i + ((n - i) / 2);
+
+      g_variant_get_child (index_contents, m, "&sut", &cur_checksum, &cur_objtype, &cur_offset);      
+      c = strcmp (cur_checksum, checksum);
+      if (c == 0)
+        {
+          if (cur_objtype < target_objtype)
+            c = -1;
+          else if (cur_objtype > target_objtype)
+            c = 1;
+        }
+
+      if (c < 0)
+        i = m + 1;
+      else if (c > 0)
+        n = m - 1;
+      else
+        {
+          *out_offset = cur_offset;
+          return TRUE;
+        } 
+    }
+
+  return FALSE;
+}
+
+static gboolean
+parse_pack_entry (gboolean       trusted,
+                  guchar        *pack_data,
+                  guint64        pack_len,
+                  guint64        offset,
+                  GVariant     **out_header,
+                  GInputStream **out_input,
+                  GCancellable  *cancellable,
+                  GError       **error)
+{
+  gboolean ret = FALSE;
+  GVariant *ret_header = NULL;
+  GConverter *decompressor = NULL;
+  GInputStream *raw_input = NULL;
+  GInputStream *ret_input = NULL;
+  guint64 data_offset;
+  guint64 header_start;
+  guint64 header_end;
+  guint32 header_len;
+  guchar entry_type;
+
+  if (G_UNLIKELY (!(offset < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range offset %" G_GUINT64_FORMAT,
+                   offset);
+      goto out;
+    }
+  if (G_UNLIKELY (!((offset & 0x3) == 0)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; unaligned offset %" G_GUINT64_FORMAT,
+                   offset);
+      goto out;
+    }
+
+  g_assert ((((guint64)pack_data+offset) & 0x3) == 0);
+  header_len = GUINT32_FROM_BE (*((guint32*)(pack_data+offset)));
+  header_end = offset + header_len;
+  if (G_UNLIKELY (!(header_end < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range header length %u",
+                   header_len);
+      goto out;
+    }
+
+  header_start = offset + 4;
+  if (G_UNLIKELY (!(header_start < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range data offset %" G_GUINT64_FORMAT,
+                   header_start);
+      goto out;
+    }
+
+  ret_header = g_variant_new_from_data (OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT,
+                                        pack_data+header_start, header_len,
+                                        trusted, NULL, NULL);
+
+  g_variant_get_child (ret_header, 2, "y", &entry_type);
+  
+  if (entry_type != OSTREE_PACK_FILE_ENTRY_TYPE_GZIP_RAW)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack; invalid entry type %u",
+                   entry_type);
+      goto out;
+    }
+
+  /* Skip 4 bytes for the header len, the actual header, then align to
+   * 8.
+   */
+  data_offset = (offset + 4 + header_len + 7) & ~0x7;
+  if (G_UNLIKELY (!(data_offset < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range offset %" G_GUINT64_FORMAT,
+                   offset);
+      goto out;
+    }
+
+  raw_input = (GInputStream*)g_memory_input_stream_new_from_data (pack_data + data_offset,
+                                                                  pack_len - data_offset,
+                                                                  NULL);
+
+  decompressor = (GConverter*)g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP);
+  ret_input = (GInputStream*)g_object_new (G_TYPE_CONVERTER_INPUT_STREAM,
+                                           "converter", decompressor,
+                                           "base-stream", raw_input,
+                                           "close-base-stream", TRUE,
+                                           NULL);
+
+  ret = TRUE;
+  ot_transfer_out_value (out_header, &ret_header);
+  ot_transfer_out_value (out_input, &ret_input);
+ out:
+  ot_clear_gvariant (&ret_header);
+  g_clear_object (&raw_input);
+  g_clear_object (&decompressor);
+  g_clear_object (&ret_input);
+  return ret;
+}
+
+gboolean
+ostree_repo_load_pack_entry (OstreeRepo         *self,
+                             const char         *pack_sha256,
+                             const char         *entry_sha256,
+                             OstreeObjectType    objtype,
+                             GInputStream      **out_input,
+                             GCancellable       *cancellable,
+                             GError            **error)
+{
+  gboolean ret = FALSE;
+  guint64 offset;
+  guchar *pack_data;
+  guint64 pack_len;
+  GVariant *index = NULL;
+  GVariant *index_contents = NULL;
+  GInputStream *ret_input = NULL;
+
+  if (!ostree_repo_load_pack_index (self, pack_sha256, &index, cancellable, error))
+    goto out;
+
+  index_contents = g_variant_get_child_value (index, 3);
+
+  if (!bsearch_in_pack_index (index_contents, entry_sha256, objtype, &offset))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Object '%s' of type %u not in pack",
+                   entry_sha256, (guint32)objtype);
+      goto out;
+    }
+
+  if (!ostree_repo_map_pack_file (self, pack_sha256, &pack_data, &pack_len,
+                                  cancellable, error))
+    goto out;
+
+  if (!parse_pack_entry (TRUE, pack_data, pack_len, offset, NULL, &ret_input,
+                         cancellable, error))
+    goto out;
+
+  ret = TRUE;
+  ot_transfer_out_value (out_input, &ret_input);
+ out:
+  ot_clear_gvariant (&index);
+  ot_clear_gvariant (&index_contents);
+  g_clear_object (&ret_input);
   return ret;
 }
 
@@ -2676,7 +2913,7 @@ list_objects_in_index (OstreeRepo                     *self,
           GVariantIter *current_packs_iter;
           const char *current_pack_checksum;
 
-          g_variant_get (objdata, "bas", &is_loose, &current_packs_iter);
+          g_variant_get (objdata, "(bas)", &is_loose, &current_packs_iter);
 
           while (g_variant_iter_loop (current_packs_iter, "&s", &current_pack_checksum))
             {
@@ -2684,7 +2921,7 @@ list_objects_in_index (OstreeRepo                     *self,
             }
           g_variant_iter_free (current_packs_iter);
         }
-      g_variant_builder_add (&pack_contents_builder, pack_checksum);
+      g_variant_builder_add (&pack_contents_builder, "s", pack_checksum);
       objdata = g_variant_new ("(b@as)", is_loose,
                                g_variant_builder_end (&pack_contents_builder));
       g_hash_table_replace (inout_objects,

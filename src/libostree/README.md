@@ -28,6 +28,27 @@ While this is still in planning, I plan to heavily optimize OSTree for
 versioning ELF operating systems.  In industry jargon, this would be
 "content-aware storage".
 
+MILESTONE 1
+-----------
+* Basic pack files
+
+MILESTONE 2
+-----------
+* Store checksums as ay
+* Drop version/metadata from tree/dirmeta objects
+* Restructure repository so that links can be generated as a cache;
+  i.e. objects/raw, pack files are now the canonical
+* Commits generate a pack?
+* For files, checksum combination of metadata variant + raw data 
+
+MILESTONE 3
+-----------
+
+* Rolling checksums for partitioning large files?  Kernel debuginfo
+* Improved pack clustering
+  - file fingerprinting?
+* ELF-x86 aware deltas
+
 Related work in storage
 -----------------------
 

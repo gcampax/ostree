@@ -147,6 +147,26 @@ gboolean      ostree_repo_load_pack_index (OstreeRepo    *self,
                                            GCancellable  *cancellable,
                                            GError       **error);
 
+gboolean      ostree_repo_load_pack_data  (OstreeRepo    *self,
+                                           const char    *sha256,
+                                           guchar       **out_data,
+                                           GCancellable  *cancellable,
+                                           GError       **error);
+
+gboolean ostree_repo_map_pack_file (OstreeRepo    *self,
+                                    const char    *sha256,
+                                    guchar       **out_data,
+                                    guint64       *out_len,
+                                    GCancellable  *cancellable,
+                                    GError       **error);
+
+gboolean ostree_repo_load_pack_entry (OstreeRepo         *self,
+                                      const char         *pack_sha256,
+                                      const char         *entry_sha256,
+                                      OstreeObjectType    objtype,
+                                      GInputStream      **object_input,
+                                      GCancellable       *cancellable,
+                                      GError            **error);
 typedef enum {
   OSTREE_REPO_COMMIT_FILTER_ALLOW,
   OSTREE_REPO_COMMIT_FILTER_SKIP

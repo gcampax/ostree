@@ -114,8 +114,7 @@ typedef enum {
 #define OSTREE_PACK_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(sut))")
 
 typedef enum {
-  OSTREE_PACK_FILE_ENTRY_FLAG_NONE = 0,
-  OSTREE_PACK_FILE_ENTRY_FLAG_COMPRESSION_GZIP = (1 << 0)
+  OSTREE_PACK_FILE_ENTRY_TYPE_GZIP_RAW = (1 << 0)
 } OstreePackFileEntryFlag;
 
 /* Pack files
@@ -132,7 +131,7 @@ typedef enum {
  */
 #define OSTREE_PACK_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}t)")
 
-#define OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT G_VARIANT_TYPE ("(ysut)")
+#define OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT G_VARIANT_TYPE ("(tuys)")
 
 gboolean ostree_validate_checksum_string (const char *sha256,
                                           GError    **error);
