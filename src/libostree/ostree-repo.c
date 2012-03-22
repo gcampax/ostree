@@ -3244,6 +3244,73 @@ checkout_file_hardlink (OstreeRepo                  *self,
   return ret;
 }
 
+static gboolean
+checkout_one_file (OstreeRepo                  *self,
+                   OstreeRepoCheckoutMode    mode,
+                   OstreeRepoCheckoutOverwriteMode    overwrite_mode,
+                   OstreeRepoFile           *src,
+                   GFileInfo                *file_info,
+                   GFile                    *destination,
+                   GCancellable             *cancellable,
+                   GError                  **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GVariant *archive_metadata = NULL;
+  GVariant *xattrs = NULL;
+  const char *checksum;
+  GFile *content_object_path = NULL;
+  GInputStream *content_input = NULL;
+  GFile *object_path = NULL;
+
+  checksum = ostree_repo_file_get_checksum ((OstreeRepoFile*)src);
+
+  if (priv->mode == OSTREE_REPO_MODE_ARCHIVE && mode == OSTREE_REPO_CHECKOUT_MODE_USER)
+    {
+      object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
+
+      if (!checkout_file_hardlink (self, mode, overwrite_mode, object_path, destination, cancellable, error) < 0)
+        goto out;
+    }
+  else if (priv->mode == OSTREE_REPO_MODE_ARCHIVE)
+    {
+      if (!ostree_repo_load_variant (self, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META, checksum, &archive_metadata, error))
+        goto out;
+              
+      if (!ostree_parse_archived_file_meta (archive_metadata, NULL, &xattrs, error))
+        goto out;
+              
+      content_object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
+
+      if (g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
+        {
+          content_input = (GInputStream*)g_file_read (content_object_path, cancellable, error);
+          if (!content_input)
+            goto out;
+        }
+
+      if (!checkout_file_from_input (destination, mode, overwrite_mode, file_info, xattrs, 
+                                     content_input, cancellable, error))
+        goto out;
+    }
+  else
+    {
+      object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_RAW_FILE);
+
+      if (!checkout_file_hardlink (self, mode, overwrite_mode, object_path, destination, cancellable, error) < 0)
+        goto out;
+    }
+
+  ret = TRUE;
+ out:
+  g_clear_object (&object_path);
+  ot_clear_gvariant (&archive_metadata);
+  ot_clear_gvariant (&xattrs);
+  g_clear_object (&content_object_path);
+  g_clear_object (&content_input);
+  return ret;
+}
+
 gboolean
 ostree_repo_checkout_tree (OstreeRepo               *self,
                            OstreeRepoCheckoutMode    mode,
@@ -3254,18 +3321,13 @@ ostree_repo_checkout_tree (OstreeRepo               *self,
                            GCancellable             *cancellable,
                            GError                  **error)
 {
-  OstreeRepoPrivate *priv = GET_PRIVATE (self);
   gboolean ret = FALSE;
   GError *temp_error = NULL;
-  GVariant *archive_metadata = NULL;
   GFileInfo *file_info = NULL;
   GVariant *xattrs = NULL;
   GFileEnumerator *dir_enum = NULL;
   GFile *src_child = NULL;
   GFile *dest_path = NULL;
-  GFile *object_path = NULL;
-  GFile *content_object_path = NULL;
-  GInputStream *content_input = NULL;
 
   if (!ostree_repo_file_get_xattrs (source, &xattrs, NULL, error))
     goto out;
@@ -3307,49 +3369,10 @@ ostree_repo_checkout_tree (OstreeRepo               *self,
         }
       else
         {
-          const char *checksum = ostree_repo_file_get_checksum ((OstreeRepoFile*)src_child);
-
-          if (priv->mode == OSTREE_REPO_MODE_ARCHIVE && mode == OSTREE_REPO_CHECKOUT_MODE_USER)
-            {
-              g_clear_object (&object_path);
-              object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
-
-              if (!checkout_file_hardlink (self, mode, overwrite_mode, object_path, dest_path, cancellable, error) < 0)
-                goto out;
-            }
-          else if (priv->mode == OSTREE_REPO_MODE_ARCHIVE)
-            {
-              ot_clear_gvariant (&archive_metadata);
-              if (!ostree_repo_load_variant (self, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META, checksum, &archive_metadata, error))
-                goto out;
-              
-              ot_clear_gvariant (&xattrs);
-              if (!ostree_parse_archived_file_meta (archive_metadata, NULL, &xattrs, error))
-                goto out;
-              
-              g_clear_object (&content_object_path);
-              content_object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
-
-              g_clear_object (&content_input);
-              if (g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
-                {
-                  content_input = (GInputStream*)g_file_read (content_object_path, cancellable, error);
-                  if (!content_input)
-                    goto out;
-                }
-
-              if (!checkout_file_from_input (dest_path, mode, overwrite_mode, file_info, xattrs, 
-                                             content_input, cancellable, error))
-                goto out;
-            }
-          else
-            {
-              g_clear_object (&object_path);
-              object_path = ostree_repo_get_object_path (self, checksum, OSTREE_OBJECT_TYPE_RAW_FILE);
-
-              if (!checkout_file_hardlink (self, mode, overwrite_mode, object_path, dest_path, cancellable, error) < 0)
-                goto out;
-            }
+          if (!checkout_one_file (self, mode, overwrite_mode,
+                                  (OstreeRepoFile*)src_child, file_info, 
+                                  dest_path, cancellable, error))
+            goto out;
         }
 
       g_clear_object (&file_info);
@@ -3365,11 +3388,7 @@ ostree_repo_checkout_tree (OstreeRepo               *self,
   g_clear_object (&dir_enum);
   g_clear_object (&file_info);
   ot_clear_gvariant (&xattrs);
-  ot_clear_gvariant (&archive_metadata);
   g_clear_object (&src_child);
-  g_clear_object (&object_path);
-  g_clear_object (&content_object_path);
-  g_clear_object (&content_input);
   g_clear_object (&dest_path);
   g_free (dest_path);
   return ret;
