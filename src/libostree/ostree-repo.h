@@ -97,6 +97,7 @@ gboolean      ostree_repo_find_object (OstreeRepo           *self,
                                        const char           *checksum,
                                        GFile               **out_stored_path,
                                        GFile               **out_pending_path,
+                                       char                **out_pack_checksum,
                                        GCancellable         *cancellable,
                                        GError              **error);
 

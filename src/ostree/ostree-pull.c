@@ -226,6 +226,7 @@ fetch_and_store_object (OstreeRepo  *repo,
   GInputStream *input = NULL;
   GFile *stored_path = NULL;
   GFile *pending_path = NULL;
+  char *pack_checksum = NULL;
   GFile *temp_path = NULL;
   GVariant *ret_metadata = NULL;
   gboolean ret_is_pending;
@@ -233,10 +234,11 @@ fetch_and_store_object (OstreeRepo  *repo,
   g_assert (objtype != OSTREE_OBJECT_TYPE_RAW_FILE);
 
   if (!ostree_repo_find_object (repo, objtype, checksum,
-                                &stored_path, &pending_path, NULL, error))
+                                &stored_path, &pending_path, &pack_checksum,
+                                cancellable, error))
     goto out;
       
-  if (!(stored_path || pending_path))
+  if (!(stored_path || pending_path || pack_checksum))
     {
       if (!fetch_object (repo, soup, baseuri, checksum, objtype, &temp_path, cancellable, error))
         goto out;
@@ -286,6 +288,7 @@ fetch_and_store_object (OstreeRepo  *repo,
   g_clear_object (&input);
   g_clear_object (&stored_path);
   g_clear_object (&pending_path);
+  g_free (pack_checksum);
   return ret;
 }
 
@@ -310,6 +313,7 @@ fetch_and_store_tree_recurse (OstreeRepo   *repo,
   GFile *content_temp_path = NULL;
   GFile *stored_path = NULL;
   GFile *pending_path = NULL;
+  char *pack_checksum = NULL;
   GInputStream *input = NULL;
 
   if (!fetch_and_store_object (repo, soup, base_uri, rev, OSTREE_OBJECT_TYPE_DIR_TREE,
@@ -339,19 +343,23 @@ fetch_and_store_tree_recurse (OstreeRepo   *repo,
 
           g_clear_object (&stored_path);
           g_clear_object (&pending_path);
+          g_free (pack_checksum);
+          pack_checksum = NULL;
           /* If we're fetching from an archive into a bare repository, we need
            * to explicitly check for raw file types locally.
            */
           if (ostree_repo_get_mode (repo) == OSTREE_REPO_MODE_BARE)
             {
               if (!ostree_repo_find_object (repo, OSTREE_OBJECT_TYPE_RAW_FILE, checksum,
-                                            &stored_path, &pending_path, cancellable, error))
+                                            &stored_path, &pending_path, &pack_checksum,
+                                            cancellable, error))
                 goto out;
             }
           else
             {
               if (!ostree_repo_find_object (repo, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT, checksum,
-                                            &stored_path, &pending_path, cancellable, error))
+                                            &stored_path, &pending_path, &pack_checksum,
+                                            cancellable, error))
                 goto out;
             }
 
@@ -451,6 +459,7 @@ fetch_and_store_tree_recurse (OstreeRepo   *repo,
   g_clear_object (&input);
   g_clear_object (&stored_path);
   g_clear_object (&pending_path);
+  g_free (pack_checksum);
   if (content_temp_path)
     {
       (void) unlink (ot_gfile_get_path_cached (content_temp_path));

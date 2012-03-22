@@ -35,6 +35,7 @@
 #define OT_GZIP_COMPRESSION_LEVEL (8)
 
 static gboolean opt_analyze_only;
+static gboolean opt_keep_loose;
 static char* opt_pack_size;
 static char* opt_int_compression;
 static char* opt_ext_compression;
@@ -50,6 +51,7 @@ static GOptionEntry options[] = {
   { "internal-compression", 0, 0, G_OPTION_ARG_STRING, &opt_int_compression, "Compress objects using COMPRESSION", "COMPRESSION" },
   { "external-compression", 0, 0, G_OPTION_ARG_STRING, &opt_ext_compression, "Compress entire packfiles using COMPRESSION", "COMPRESSION" },
   { "analyze-only", 0, 0, G_OPTION_ARG_NONE, &opt_analyze_only, "Just analyze current state", NULL },
+  { "keep-loose", 0, 0, G_OPTION_ARG_NONE, &opt_keep_loose, "Don't delete loose objects", NULL },
   { NULL }
 };
 
@@ -660,11 +662,13 @@ static gboolean
 do_stats_gather_loose (OtRepackData  *data,
                        GHashTable    *objects,
                        GHashTable   **out_loose,
+                       GHashTable   **out_loose_and_packed,
                        GCancellable  *cancellable,
                        GError       **error)
 {
   gboolean ret = FALSE;
   GHashTable *ret_loose = NULL;
+  GHashTable *ret_loose_and_packed = NULL;
   guint n_loose = 0;
   guint n_loose_and_packed = 0;
   guint n_packed = 0;
@@ -679,6 +683,9 @@ do_stats_gather_loose (OtRepackData  *data,
   ret_loose = g_hash_table_new_full (ostree_hash_object_name, g_variant_equal,
                                      (GDestroyNotify) g_variant_unref,
                                      NULL);
+  ret_loose_and_packed = g_hash_table_new_full (ostree_hash_object_name, g_variant_equal,
+                                                (GDestroyNotify) g_variant_unref,
+                                                NULL);
 
   g_hash_table_iter_init (&hash_iter, objects);
   while (g_hash_table_iter_next (&hash_iter, &key, &value))
@@ -698,14 +705,19 @@ do_stats_gather_loose (OtRepackData  *data,
       is_packed = g_variant_n_children (pack_array) > 0;
       
       if (is_loose && is_packed)
-        n_loose_and_packed++;
+        {
+          GVariant *copy = g_variant_ref (serialized_key);
+          g_hash_table_replace (ret_loose_and_packed, copy, copy);
+          n_loose++;
+          n_loose_and_packed++;
+        }
       else if (is_loose)
         {
           GVariant *copy = g_variant_ref (serialized_key);
           g_hash_table_replace (ret_loose, copy, copy);
           n_loose++;
         }
-      else if (g_variant_n_children (pack_array) > 0)
+      else if (g_variant_n_children (pack_array) > 1)
         n_dup_packed++;
       else
         n_packed++;
@@ -743,9 +755,12 @@ do_stats_gather_loose (OtRepackData  *data,
 
   ret = TRUE;
   ot_transfer_out_value (out_loose, &ret_loose);
+  ot_transfer_out_value (out_loose_and_packed, &ret_loose_and_packed);
  /* out: */
   if (ret_loose)
     g_hash_table_unref (ret_loose);
+  if (ret_loose_and_packed)
+    g_hash_table_unref (ret_loose_and_packed);
   return ret;
 }
 
@@ -761,6 +776,10 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   guint i;
   GPtrArray *clusters = NULL;
   GHashTable *loose_objects = NULL;
+  GHashTable *loose_and_packed_objects = NULL;
+  GHashTableIter hash_iter;
+  gpointer key, value;
+  GFile *objpath = NULL;
 
   memset (&data, 0, sizeof (data));
 
@@ -788,11 +807,29 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   if (!ostree_repo_list_objects (repo, OSTREE_REPO_LIST_OBJECTS_ALL, &objects, cancellable, error))
     goto out;
 
-  if (!do_stats_gather_loose (&data, objects, &loose_objects, cancellable, error))
+  if (!do_stats_gather_loose (&data, objects, &loose_objects, &loose_and_packed_objects, cancellable, error))
     goto out;
 
   g_print ("\n");
   g_print ("Using pack size: %" G_GUINT64_FORMAT "\n", data.pack_size);
+
+  if (!opt_keep_loose)
+    {
+      g_hash_table_iter_init (&hash_iter, loose_and_packed_objects);
+      while (g_hash_table_iter_next (&hash_iter, &key, &value))
+        {
+          GVariant *variant = key;
+          const char *checksum;
+          OstreeObjectType objtype;
+
+          ostree_object_name_deserialize (variant, &checksum, &objtype);
+
+          g_clear_object (&objpath);
+          objpath = ostree_repo_get_object_path (data.repo, checksum, objtype);
+          if (!g_file_delete (objpath, cancellable, error))
+            goto out;
+        }
+    }
 
   if (!cluster_objects_stupidly (&data, loose_objects, &clusters, cancellable, error))
     goto out;
@@ -817,6 +854,7 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
 
   ret = TRUE;
  out:
+  g_clear_object (&objpath);
   if (context)
     g_option_context_free (context);
   g_clear_object (&repo);
