@@ -817,13 +817,9 @@ ostree_repo_file_tree_query_child (OstreeRepoFile  *self,
   const char *name = NULL;
   gboolean ret = FALSE;
   GFileInfo *ret_info = NULL;
-  GFile *archive_data_path = NULL;
-  GFileInfo *archive_data_info = NULL;
-  GVariant *archive_metadata = NULL;
   GVariant *files_variant = NULL;
   GVariant *dirs_variant = NULL;
   GVariant *tree_child_metadata = NULL;
-  GFile *local_child = NULL;
   GFileAttributeMatcher *matcher = NULL;
   int c;
 
@@ -844,40 +840,9 @@ ostree_repo_file_tree_query_child (OstreeRepoFile  *self,
 
       g_variant_get_child (files_variant, n, "(&s&s)", &name, &checksum);
 
-      local_child = ostree_repo_get_file_object_path (self->repo, checksum);
-
-      if (ostree_repo_get_mode (self->repo) == OSTREE_REPO_MODE_ARCHIVE)
-	{
-          if (!ostree_map_metadata_file (local_child, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META,
-                                         &archive_metadata, error))
-            goto out;
-          if (!ostree_parse_archived_file_meta (archive_metadata, &ret_info, NULL, error))
-            goto out;
-
-          archive_data_path = ostree_repo_get_object_path (self->repo, checksum,
-                                                           OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
-          archive_data_info = g_file_query_info (archive_data_path,
-                                                 OSTREE_GIO_FAST_QUERYINFO,
-                                                 G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-                                                 cancellable,
-                                                 error);
-          if (!archive_data_info)
-            goto out;
-          
-          g_file_info_set_attribute_uint64 (ret_info, "standard::size",
-                                            g_file_info_get_attribute_uint64 (archive_data_info,
-                                                                              "standard::size"));
-	}
-      else
-	{
-          ret_info = g_file_query_info (local_child,
-                                        OSTREE_GIO_FAST_QUERYINFO,
-                                        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-                                        cancellable,
-                                        error);
-          if (!ret_info)
-            goto out;
-	}
+      if (!ostree_repo_load_file (self->repo, checksum, NULL, &ret_info, NULL,
+                                  cancellable, error))
+        goto out;
     }
   else
     {
@@ -918,12 +883,8 @@ ostree_repo_file_tree_query_child (OstreeRepoFile  *self,
   ot_transfer_out_value(out_info, &ret_info);
  out:
   g_clear_object (&ret_info);
-  g_clear_object (&local_child);
-  g_clear_object (&archive_data_path);
-  g_clear_object (&archive_data_info);
   if (matcher)
     g_file_attribute_matcher_unref (matcher);
-  ot_clear_gvariant (&archive_metadata);
   ot_clear_gvariant (&tree_child_metadata);
   ot_clear_gvariant (&files_variant);
   ot_clear_gvariant (&dirs_variant);

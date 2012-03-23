@@ -188,17 +188,17 @@ compare_index_content (gconstpointer         ap,
   gpointer b = *((gpointer*)bp);
   GVariant *a_v = a;
   GVariant *b_v = b;
-  const char *a_checksum;
-  const char *b_checksum;
+  GVariant *a_csum_bytes;
+  GVariant *b_csum_bytes;
   guint32 a_objtype;
   guint32 b_objtype;
   guint64 a_offset;
   guint64 b_offset;
   int c;
 
-  g_variant_get (a_v, "(&sut)", &a_checksum, &a_objtype, &a_offset);      
-  g_variant_get (b_v, "(&sut)", &b_checksum, &b_objtype, &b_offset);      
-  c = strcmp (a_checksum, b_checksum);
+  g_variant_get (a_v, "(u@ayt)", &a_objtype, &a_csum_bytes, &a_offset);      
+  g_variant_get (b_v, "(u@ayt)", &b_objtype, &b_csum_bytes, &b_offset);      
+  c = ostree_cmp_checksum_bytes (a_csum_bytes, b_csum_bytes);
   if (c == 0)
     {
       if (a_objtype < b_objtype)
@@ -232,13 +232,14 @@ create_pack_file (OtRepackData        *data,
   gsize bytes_written;
   GPtrArray *index_content_list = NULL;
   GVariant *pack_header = NULL;
-  GVariant *object_header = NULL;
+  GVariant *packed_object = NULL;
   GVariant *index_content = NULL;
   GVariantBuilder index_content_builder;
   GChecksum *pack_checksum = NULL;
   char *pack_name = NULL;
   GFile *pack_file_path = NULL;
   GFile *pack_index_path = NULL;
+  GMemoryOutputStream *object_data_stream = NULL;
 
   if (g_cancellable_set_error_if_cancelled (cancellable, error))
     return FALSE;
@@ -262,10 +263,10 @@ create_pack_file (OtRepackData        *data,
   offset = 0;
   pack_checksum = g_checksum_new (G_CHECKSUM_SHA256);
 
-  pack_header = g_variant_new ("(su@a{sv}u)",
-                               "OSTPACK", GUINT32_TO_BE (0),
+  pack_header = g_variant_new ("(s@a{sv}t)",
+                               "OSTv0PACKFILE",
                                g_variant_new_array (G_VARIANT_TYPE ("{sv}"), NULL, 0),
-                               objects->len);
+                               (guint64)objects->len);
 
   if (!write_variant_with_size (pack_out, pack_header, pack_checksum, &offset,
                                 cancellable, error))
@@ -281,8 +282,9 @@ create_pack_file (OtRepackData        *data,
       guint64 obj_bytes_written;
       guint64 expected_objsize;
       guint64 objsize;
-      GOutputStream *write_pack_out;
-      guchar entry_type;
+      GOutputStream *write_object_out;
+      guchar entry_flags = 0;
+      GVariant *index_entry;
 
       g_variant_get (object_data, "(&sut)", &checksum, &objtype_u32, &expected_objsize);
                      
@@ -292,21 +294,30 @@ create_pack_file (OtRepackData        *data,
         goto out;
 
       /* offset points to aligned header size */
-      g_ptr_array_add (index_content_list,
-                       g_variant_ref_sink (g_variant_new ("(sut)", checksum, (guint32)objtype, offset)));
+      index_entry = g_variant_new ("(uayt)",
+                                   (guint32)objtype, ostree_checksum_to_bytes (checksum), offset);
+      g_ptr_array_add (index_content_list, g_variant_ref_sink (index_entry));
 
-      ot_clear_gvariant (&object_header);
-      switch (data->int_compression)
+      if (objtype == OSTREE_OBJECT_TYPE_DIR_TREE
+          || objtype == OSTREE_OBJECT_TYPE_DIR_META
+          || objtype == OSTREE_OBJECT_TYPE_COMMIT)
         {
-        case OT_COMPRESSION_GZIP:
-          {
-            entry_type = OSTREE_PACK_FILE_ENTRY_TYPE_GZIP_RAW;
-            break;
-          }
-        default:
-          {
-            g_assert_not_reached ();
-          }
+          ;
+        }
+      else
+        {
+          switch (data->int_compression)
+            {
+            case OT_COMPRESSION_GZIP:
+              {
+                entry_flags |= OSTREE_PACK_FILE_ENTRY_FLAG_GZIP;
+                break;
+              }
+            default:
+              {
+                g_assert_not_reached ();
+              }
+            }
         }
 
       g_clear_object (&object_path);
@@ -326,38 +337,26 @@ create_pack_file (OtRepackData        *data,
 
       g_assert_cmpint (objsize, ==, expected_objsize);
 
-      ot_clear_gvariant (&object_header);
-      object_header = g_variant_new ("(tuys)", GUINT64_TO_BE (objsize),
-                                     GUINT32_TO_BE ((guint32)objtype),
-                                     entry_type,
-                                     checksum);
-
-      if (!write_variant_with_size (pack_out, object_header, pack_checksum,
-                                    &offset, cancellable, error))
-        goto out;
+      g_clear_object (&object_data_stream);
+      object_data_stream = (GMemoryOutputStream*)g_memory_output_stream_new (NULL, 0, NULL, NULL);
       
-      if (data->int_compression != OT_COMPRESSION_NONE)
+      if (entry_flags & OSTREE_PACK_FILE_ENTRY_FLAG_GZIP)
         {
           g_clear_object (&compressor);
-          switch (data->int_compression)
-            {
-            case OT_COMPRESSION_GZIP:
-              compressor = (GConverter*)g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, OT_GZIP_COMPRESSION_LEVEL);
-              break;
-            default:
-              g_assert_not_reached ();
-            }
+          compressor = (GConverter*)g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, OT_GZIP_COMPRESSION_LEVEL);
           
           g_clear_object (&compressed_object_output);
           compressed_object_output = (GConverterOutputStream*)g_object_new (G_TYPE_CONVERTER_OUTPUT_STREAM,
                                                                             "converter", compressor,
-                                                                            "base-stream", pack_out,
-                                                                            "close-base-stream", FALSE,
+                                                                            "base-stream", object_data_stream,
+                                                                            "close-base-stream", TRUE,
                                                                             NULL);
-          write_pack_out = (GOutputStream*)compressed_object_output;
+          write_object_out = (GOutputStream*)compressed_object_output;
         }
       else
-         write_pack_out = (GOutputStream*)pack_out;
+        {
+          write_object_out = (GOutputStream*)object_data_stream;
+        }
 
       obj_bytes_written = 0;
       do
@@ -367,7 +366,7 @@ create_pack_file (OtRepackData        *data,
           g_checksum_update (pack_checksum, (guint8*)buf, bytes_read);
           if (bytes_read > 0)
             {
-              if (!g_output_stream_write_all (write_pack_out, buf, bytes_read, &bytes_written, cancellable, error))
+              if (!g_output_stream_write_all (write_object_out, buf, bytes_read, &bytes_written, cancellable, error))
                 goto out;
               offset += bytes_written;
               obj_bytes_written += bytes_written;
@@ -375,14 +374,24 @@ create_pack_file (OtRepackData        *data,
         }
       while (bytes_read > 0);
 
-      if (compressed_object_output)
-        {
-          if (!g_output_stream_flush ((GOutputStream*)compressed_object_output, cancellable, error))
-            goto out;
-        }
+      if (!g_output_stream_close (write_object_out, cancellable, error))
+        goto out;
 
       g_assert_cmpint (obj_bytes_written, ==, objsize);
 
+      ot_clear_gvariant (&packed_object);
+      packed_object = g_variant_new ("(uy@ay@ay)", GUINT32_TO_BE ((guint32)objtype),
+                                     entry_flags,
+                                     g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
+                                                                g_memory_output_stream_get_data (object_data_stream),
+                                                                g_memory_output_stream_get_data_size (object_data_stream),
+                                                                1),
+                                     ostree_checksum_to_bytes (checksum));
+      g_clear_object (&object_data_stream);
+
+      if (!write_variant_with_size (pack_out, packed_object, pack_checksum,
+                                    &offset, cancellable, error))
+        goto out;
     }
   
   if (!g_output_stream_close (pack_out, cancellable, error))
@@ -414,8 +423,8 @@ create_pack_file (OtRepackData        *data,
       GVariant *index_item = index_content_list->pdata[i];
       g_variant_builder_add_value (&index_content_builder, index_item);
     }
-  index_content = g_variant_new ("(su@a{sv}@a(sut))",
-                                 "OSTPACKINDEX", GUINT32_TO_BE(0),
+  index_content = g_variant_new ("(s@a{sv}@a(uayt))",
+                                 "OSTv0PACKINDEX",
                                  g_variant_new_array (G_VARIANT_TYPE ("{sv}"), NULL, 0),
                                  g_variant_builder_end (&index_content_builder));
 
@@ -460,7 +469,6 @@ create_pack_file (OtRepackData        *data,
   g_clear_object (&compressor);
   g_clear_object (&compressed_object_output);
   g_clear_object (&object_file_info);
-  ot_clear_gvariant (&object_header);
   if (pack_checksum)
     g_checksum_free (pack_checksum);
   g_clear_object (&pack_dir);
@@ -544,7 +552,7 @@ cluster_objects_stupidly (OtRepackData      *data,
 
       g_variant_get_child (objdata, 2, "t", &objsize);
 
-      if (current_size + objsize > data->pack_size)
+      if (current_size + objsize > data->pack_size || i == (object_list->len - 1))
         {
           guint j;
           GPtrArray *current = g_ptr_array_new ();
@@ -708,7 +716,6 @@ do_stats_gather_loose (OtRepackData  *data,
         {
           GVariant *copy = g_variant_ref (serialized_key);
           g_hash_table_replace (ret_loose_and_packed, copy, copy);
-          n_loose++;
           n_loose_and_packed++;
         }
       else if (is_loose)
@@ -792,6 +799,13 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   repo = ostree_repo_new (repo_path);
   if (!ostree_repo_check (repo, error))
     goto out;
+
+  if (ostree_repo_get_mode (repo) != OSTREE_REPO_MODE_ARCHIVE)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "Can't repack bare repositories yet");
+      goto out;
+    }
 
   data.repo = repo;
   data.error = error;

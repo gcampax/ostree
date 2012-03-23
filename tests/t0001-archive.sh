@@ -21,7 +21,7 @@ set -e
 
 . libtest.sh
 
-echo '1..10'
+echo '1..13'
 
 setup_test_repository "archive"
 echo "ok setup"
@@ -67,3 +67,14 @@ cd ${test_tmpdir}
 $OSTREE cat test2 /baz/cow > cow-contents
 assert_file_has_content cow-contents "moo"
 echo "ok cat-file"
+
+cd ${test_tmpdir}
+$OSTREE repack
+echo "ok repack"
+
+cd ${test_tmpdir}
+$OSTREE repack
+echo "ok repack again"
+
+$OSTREE checkout test2 checkout-test2-from-packed
+echo "ok checkout union 1"

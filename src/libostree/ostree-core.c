@@ -597,6 +597,24 @@ ostree_hash_object_name (gconstpointer a)
   return g_str_hash (checksum) + g_int_hash (&objtype_int);
 }
 
+int
+ostree_cmp_checksum_bytes (GVariant *a,
+                           GVariant *b)
+{
+  gconstpointer a_data;
+  gconstpointer b_data;
+  gsize a_n_elts;
+  gsize b_n_elts;
+  
+  a_data = g_variant_get_fixed_array (a, &a_n_elts, 1);
+  g_assert (a_n_elts == 32);
+  b_data = g_variant_get_fixed_array (b, &b_n_elts, 1);
+  g_assert (b_n_elts == 32);
+
+  return memcmp (a_data, b_data, 32);
+}
+
+
 GVariant *
 ostree_object_name_serialize (const char *checksum,
                               OstreeObjectType objtype)
@@ -611,6 +629,82 @@ ostree_object_name_deserialize (GVariant         *variant,
 {
   guint32 objtype_u32;
   g_variant_get (variant, "(&su)", out_checksum, &objtype_u32);
+  *out_objtype = (OstreeObjectType)objtype_u32;
+}
+
+GVariant *
+ostree_checksum_to_bytes (const char *sha256)
+{
+  guchar result[32];
+  guint i = 0;
+
+  for (i = 0; i < 32; i += 2)
+    {
+      gint big, little;
+
+      g_assert (sha256[i]);
+      g_assert (sha256[i+1]);
+
+      big = g_ascii_xdigit_value (sha256[i]);
+      little = g_ascii_xdigit_value (sha256[i+1]);
+
+      result[i] += (big << 4) | little;
+    }
+  
+  return g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
+                                    result, 32, 1);
+}
+
+char *
+ostree_checksum_from_bytes (GVariant *csum_bytes)
+{
+  GString *ret = g_string_new ("");
+  const guchar *bytes;
+  gsize n_elts;
+  guint i;
+
+  bytes = g_variant_get_fixed_array (csum_bytes, &n_elts, 1);
+  g_assert (n_elts == 32);
+  
+  for (i = 0; i < 32; i++)
+    g_string_append_printf (ret, "%x", bytes[i]);
+
+  return g_string_free (ret, FALSE);
+}
+
+GVariant *
+ostree_object_name_serialize_v2 (const char        *checksum,
+                                 OstreeObjectType   objtype)
+{
+  return g_variant_new ("(u@ay)", (guint32)objtype, ostree_checksum_to_bytes (checksum));
+}
+
+void
+ostree_object_name_deserialize_v2_hex (GVariant         *variant,
+                                       char            **out_checksum,
+                                       OstreeObjectType *out_objtype)
+{
+  GVariant *csum_bytes;
+  guint32 objtype_u32;
+
+  g_variant_get (variant, "(u@ay)", &objtype_u32, &csum_bytes);
+  g_variant_ref_sink (csum_bytes);
+  *out_checksum = ostree_checksum_from_bytes (csum_bytes);
+  g_variant_unref (csum_bytes);
+  *out_objtype = (OstreeObjectType)objtype_u32;
+}
+
+void
+ostree_object_name_deserialize_v2_bytes (GVariant         *variant,
+                                         const guchar    **out_checksum,
+                                         OstreeObjectType *out_objtype)
+{
+  GVariant *csum_bytes;
+  guint32 objtype_u32;
+  gsize n_elts;
+
+  g_variant_get (variant, "(u@ay)", &objtype_u32, &csum_bytes);
+  *out_checksum = (guchar*)g_variant_get_fixed_array (csum_bytes, &n_elts, 1);
   *out_objtype = (OstreeObjectType)objtype_u32;
 }
 

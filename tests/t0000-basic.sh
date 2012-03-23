@@ -19,7 +19,7 @@
 
 set -e
 
-echo "1..31"
+echo "1..28"
 
 . libtest.sh
 
@@ -205,15 +205,4 @@ find checkout-test2-union | wc -l > union-files-count.new
 cmp union-files-count{,.new}
 cd checkout-test2-union
 assert_file_has_content ./yet/another/tree/green "leaf"
-echo "ok checkout union 1"
-
-cd ${test_tmpdir}
-$OSTREE repack
-echo "ok repack"
-
-cd ${test_tmpdir}
-$OSTREE repack
-echo "ok repack again"
-
-$OSTREE checkout test2 checkout-test2-from-packed
 echo "ok checkout union 1"

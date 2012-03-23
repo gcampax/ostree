@@ -234,7 +234,8 @@ fetch_and_store_object (OstreeRepo  *repo,
   g_assert (objtype != OSTREE_OBJECT_TYPE_RAW_FILE);
 
   if (!ostree_repo_find_object (repo, objtype, checksum,
-                                &stored_path, &pending_path, &pack_checksum,
+                                &stored_path, &pending_path,
+                                &pack_checksum, NULL,
                                 cancellable, error))
     goto out;
       
@@ -351,14 +352,14 @@ fetch_and_store_tree_recurse (OstreeRepo   *repo,
           if (ostree_repo_get_mode (repo) == OSTREE_REPO_MODE_BARE)
             {
               if (!ostree_repo_find_object (repo, OSTREE_OBJECT_TYPE_RAW_FILE, checksum,
-                                            &stored_path, &pending_path, &pack_checksum,
+                                            &stored_path, &pending_path, &pack_checksum, NULL,
                                             cancellable, error))
                 goto out;
             }
           else
             {
               if (!ostree_repo_find_object (repo, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT, checksum,
-                                            &stored_path, &pending_path, &pack_checksum,
+                                            &stored_path, &pending_path, &pack_checksum, NULL,
                                             cancellable, error))
                 goto out;
             }

@@ -106,35 +106,34 @@ typedef enum {
 #define OSTREE_PACK_SUPER_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(say))")
 
 /* Pack index
- * s - OSTPACKINDEX
- * u - Version
+ * s - OSTv0PACKINDEX
  * a{sv} - Metadata
- * a(sut) - (checksum, objtype, offset into packfile)
+ * a(uayt) - (objtype, checksum, offset into packfile)
  */
-#define OSTREE_PACK_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(sut))")
+#define OSTREE_PACK_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sa{sv}a(uayt))")
 
 typedef enum {
-  OSTREE_PACK_FILE_ENTRY_TYPE_GZIP_RAW = (1 << 0)
+  OSTREE_PACK_FILE_ENTRY_FLAG_NONE = 0,
+  OSTREE_PACK_FILE_ENTRY_FLAG_GZIP = (1 << 0)
 } OstreePackFileEntryFlag;
 
 /* Pack files
- * s - OSTPACKFILE
- * u - Version
+ * s - OSTv0PACKFILE
  * a{sv} - Metadata
- * u - number of entries
+ * t - number of entries
  *
- * Repeating tuple of:
- * <padding to alignment of 4>
- * <32 bit BE integer containing variant length>
+ * Repeating pair of:
  * <padding to alignment of 8>
- * ( tuys ) - content_length, objtype, flags, checksum
+ * ( uyayay ) - objtype, flags, checksum, data
  */
-#define OSTREE_PACK_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}t)")
+#define OSTREE_PACK_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(sa{sv}t)")
 
-#define OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT G_VARIANT_TYPE ("(tuys)")
+#define OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT G_VARIANT_TYPE ("(uyayay)")
 
 gboolean ostree_validate_checksum_string (const char *sha256,
                                           GError    **error);
+
+GVariant *ostree_checksum_to_bytes (const char *sha256);
 
 gboolean ostree_validate_rev (const char *rev, GError **error);
 
@@ -146,12 +145,28 @@ OstreeObjectType ostree_object_type_from_string (const char *str);
 
 guint ostree_hash_object_name (gconstpointer a);
 
+int ostree_cmp_checksum_bytes (GVariant *a, GVariant *b);
+
 GVariant *ostree_object_name_serialize (const char *checksum,
                                         OstreeObjectType objtype);
 
 void ostree_object_name_deserialize (GVariant         *variant,
                                      const char      **out_checksum,
                                      OstreeObjectType *out_objtype);
+
+GVariant *ostree_object_name_serialize_v2 (const char *checksum,
+                                           OstreeObjectType objtype);
+
+void ostree_object_name_deserialize_v2_hex (GVariant         *variant,
+                                            char            **out_checksum,
+                                            OstreeObjectType *out_objtype);
+
+void ostree_object_name_deserialize_v2_bytes (GVariant         *variant,
+                                              const guchar    **out_checksum,
+                                              OstreeObjectType *out_objtype);
+
+GVariant * ostree_checksum_to_bytes (const char *sha256);
+char * ostree_checksum_from_bytes (GVariant *bytes);
 
 char * ostree_object_to_string (const char *checksum,
                                 OstreeObjectType objtype);

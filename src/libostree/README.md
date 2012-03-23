@@ -18,6 +18,7 @@ Key differences versus git
 --------------------------
 
  * As mentioned above, extended attributes and owner uid/gid are versioned
+ * Optimized for Unix hardlinks between repository and checkout
  * SHA256 instead of SHA1
  * Support for empty directories
 
@@ -28,9 +29,16 @@ While this is still in planning, I plan to heavily optimize OSTree for
 versioning ELF operating systems.  In industry jargon, this would be
 "content-aware storage".
 
+Trimming history
+----------------
+
+OSTree will also be optimized to trim intermediate history; in theory
+one can regenerate binaries from corresponding (git) source code, so
+we don't need to keep all possible builds over time.
+
 MILESTONE 1
 -----------
-* Basic pack files
+* Basic pack files (like git)
 
 MILESTONE 2
 -----------
@@ -38,12 +46,17 @@ MILESTONE 2
 * Drop version/metadata from tree/dirmeta objects
 * Restructure repository so that links can be generated as a cache;
   i.e. objects/raw, pack files are now the canonical
-* Commits generate a pack?
 * For files, checksum combination of metadata variant + raw data 
 
 MILESTONE 3
 -----------
 
+* Drop archive/raw distinction - archive repositories always generate
+  packfiles per commit
+* Include git packv4 ideas:
+  - split packfile implementations between metadata and data
+  - metadata packfiles have string dictionary (tree filenames and checksums)
+  - data packfiles match up similar objects
 * Rolling checksums for partitioning large files?  Kernel debuginfo
 * Improved pack clustering
   - file fingerprinting?

@@ -98,6 +98,7 @@ gboolean      ostree_repo_find_object (OstreeRepo           *self,
                                        GFile               **out_stored_path,
                                        GFile               **out_pending_path,
                                        char                **out_pack_checksum,
+                                       guint64              *out_pack_offset,
                                        GCancellable         *cancellable,
                                        GError              **error);
 
@@ -161,13 +162,14 @@ gboolean ostree_repo_map_pack_file (OstreeRepo    *self,
                                     GCancellable  *cancellable,
                                     GError       **error);
 
-gboolean ostree_repo_load_pack_entry (OstreeRepo         *self,
-                                      const char         *pack_sha256,
-                                      const char         *entry_sha256,
-                                      OstreeObjectType    objtype,
-                                      GInputStream      **object_input,
-                                      GCancellable       *cancellable,
-                                      GError            **error);
+gboolean ostree_repo_load_file (OstreeRepo         *self,
+                                const char         *entry_sha256,
+                                GInputStream      **out_input,
+                                GFileInfo         **out_file_info,
+                                GVariant          **out_xattrs,
+                                GCancellable       *cancellable,
+                                GError            **error);
+
 typedef enum {
   OSTREE_REPO_COMMIT_FILTER_ALLOW,
   OSTREE_REPO_COMMIT_FILTER_SKIP
