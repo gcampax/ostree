@@ -77,6 +77,34 @@ ot_gfile_ensure_directory (GFile     *dir,
   return ret;
 }
 
+/**
+ * ot_gfile_unlink:
+ * @path: Path to file
+ * @cancellable: a #GCancellable
+ * @error: a #GError
+ *
+ * Like g_file_delete(), except this function does not follow Unix
+ * symbolic links, and will delete a symbolic link even if it's
+ * pointing to a nonexistent file.
+ *
+ * Returns: %TRUE on success, %FALSE on error
+ */
+gboolean
+ot_gfile_unlink (GFile          *path,
+                 GCancellable   *cancellable,
+                 GError        **error)
+{
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return FALSE;
+
+  if (unlink (ot_gfile_get_path_cached (path)) < 0)
+    {
+      ot_util_set_error_from_errno (error, errno);
+      return FALSE;
+    }
+  return TRUE;
+}
+
 gboolean
 ot_gfile_load_contents_utf8 (GFile         *file,
                              char         **contents_out,

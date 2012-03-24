@@ -44,6 +44,10 @@ const char *ot_gfile_get_basename_cached (GFile *file);
 
 gboolean ot_gfile_ensure_directory (GFile *dir, gboolean with_parents, GError **error);
 
+gboolean ot_gfile_unlink (GFile          *path,
+                          GCancellable   *cancellable,
+                          GError        **error);
+
 gboolean ot_gfile_load_contents_utf8 (GFile         *file,
                                       char         **contents_out,
                                       char         **etag_out,
