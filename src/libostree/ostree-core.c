@@ -636,40 +636,49 @@ GVariant *
 ostree_checksum_to_bytes (const char *sha256)
 {
   guchar result[32];
-  guint i = 0;
+  guint i;
+  guint j;
 
-  for (i = 0; i < 32; i += 2)
+  for (i = 0, j = 0; i < 32; i += 1, j += 2)
     {
       gint big, little;
 
-      g_assert (sha256[i]);
-      g_assert (sha256[i+1]);
+      g_assert (sha256[j]);
+      g_assert (sha256[j+1]);
 
-      big = g_ascii_xdigit_value (sha256[i]);
-      little = g_ascii_xdigit_value (sha256[i+1]);
+      big = g_ascii_xdigit_value (sha256[j]);
+      little = g_ascii_xdigit_value (sha256[j+1]);
 
-      result[i] += (big << 4) | little;
+      result[i] = (big << 4) | little;
     }
   
   return g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
-                                    result, 32, 1);
+                                    (guchar*)result, 32, 1);
 }
 
 char *
 ostree_checksum_from_bytes (GVariant *csum_bytes)
 {
-  GString *ret = g_string_new ("");
+  static const gchar hexchars[] = "0123456789abcdef";
+  char *ret;
   const guchar *bytes;
   gsize n_elts;
-  guint i;
+  guint i, j;
 
   bytes = g_variant_get_fixed_array (csum_bytes, &n_elts, 1);
   g_assert (n_elts == 32);
-  
-  for (i = 0; i < 32; i++)
-    g_string_append_printf (ret, "%x", bytes[i]);
 
-  return g_string_free (ret, FALSE);
+  ret = g_malloc (65);
+  
+  for (i = 0, j = 0; i < 32; i++, j += 2)
+    {
+      guchar byte = bytes[i];
+      ret[j] = hexchars[byte >> 4];
+      ret[j+1] = hexchars[byte & 0xF];
+    }
+  ret[j] = '\0';
+
+  return ret;
 }
 
 GVariant *

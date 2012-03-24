@@ -2512,6 +2512,7 @@ ostree_repo_load_pack_index (OstreeRepo    *self,
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   GVariant *ret_variant = NULL;
   GFile *path = NULL;
+  const char *header;
   
   ret_variant = g_hash_table_lookup (priv->pack_index_mappings, sha256);
   if (ret_variant)
@@ -2527,6 +2528,15 @@ ostree_repo_load_pack_index (OstreeRepo    *self,
         goto out;
       g_hash_table_insert (priv->pack_index_mappings, g_strdup (sha256),
                            g_variant_ref (ret_variant));
+    }
+
+  g_variant_get_child (ret_variant, 0, "&s", &header);
+
+  if (strcmp (header, "OSTv0PACKINDEX") != 0)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid pack version, expected 'OSTv0PACKINDEX'");
+      goto out;
     }
 
   ret = TRUE;
@@ -2890,16 +2900,19 @@ list_objects_in_index (OstreeRepo                     *self,
   if (!ostree_repo_load_pack_index (self, pack_checksum, &index_variant, cancellable, error))
     goto out;
 
-  contents = g_variant_get_child_value (index_variant, 3);
+  contents = g_variant_get_child_value (index_variant, 2);
   g_variant_iter_init (&content_iter, contents);
 
-  while (g_variant_iter_loop (&content_iter, "(&u@ayt)", &objtype_u32, &csum_bytes, &offset))
+  while (g_variant_iter_loop (&content_iter, "(u@ayt)", &objtype_u32, &csum_bytes, &offset))
     {
       GVariant *obj_key;
       GVariant *objdata;
-      OstreeObjectType objtype = (OstreeObjectType)objtype_u32;
+      OstreeObjectType objtype;
       GVariantBuilder pack_contents_builder;
       gboolean is_loose;
+
+      objtype = (OstreeObjectType) GUINT32_FROM_BE (objtype_u32);
+      offset = GUINT64_FROM_BE (offset);
 
       g_variant_builder_init (&pack_contents_builder,
                               G_VARIANT_TYPE_STRING_ARRAY);
@@ -2907,6 +2920,7 @@ list_objects_in_index (OstreeRepo                     *self,
       g_free (checksum);
       checksum = ostree_checksum_from_bytes (csum_bytes);
       obj_key = ostree_object_name_serialize (checksum, objtype);
+      ot_util_variant_take_ref (obj_key);
 
       objdata = g_hash_table_lookup (inout_objects, obj_key);
       if (!objdata)
@@ -2922,7 +2936,7 @@ list_objects_in_index (OstreeRepo                     *self,
 
           while (g_variant_iter_loop (current_packs_iter, "&s", &current_pack_checksum))
             {
-              g_variant_builder_add (&pack_contents_builder, current_pack_checksum);
+              g_variant_builder_add (&pack_contents_builder, "s", current_pack_checksum);
             }
           g_variant_iter_free (current_packs_iter);
         }
@@ -2930,8 +2944,8 @@ list_objects_in_index (OstreeRepo                     *self,
       objdata = g_variant_new ("(b@as)", is_loose,
                                g_variant_builder_end (&pack_contents_builder));
       g_hash_table_replace (inout_objects,
-                            ot_util_variant_take_ref (obj_key),
-                            ot_util_variant_take_ref (objdata));
+                            obj_key,
+                            g_variant_ref (objdata));
     }
 
   ret = TRUE;
@@ -3176,6 +3190,7 @@ ostree_repo_load_variant (OstreeRepo  *self,
       
       g_variant_get (container_variant, "(uv)",
                      &actual_type, &ret_variant);
+      actual_type = GUINT32_FROM_BE (actual_type);
       ot_util_variant_take_ref (ret_variant);
 
       if (actual_type != expected_type)
