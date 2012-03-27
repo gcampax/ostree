@@ -237,7 +237,6 @@ create_pack_file (OtRepackData        *data,
   GConverterInputStream *compressed_object_input = NULL;
   guint i;
   guint64 offset;
-  gsize bytes_read;
   gsize bytes_written;
   GPtrArray *index_content_list = NULL;
   GVariant *pack_header = NULL;
@@ -287,7 +286,6 @@ create_pack_file (OtRepackData        *data,
       const char *checksum;
       guint32 objtype_u32;
       OstreeObjectType objtype;
-      char buf[4096];
       guint64 expected_objsize;
       guint64 objsize;
       GInputStream *read_object_in;
@@ -349,16 +347,9 @@ create_pack_file (OtRepackData        *data,
           read_object_in = (GInputStream*)object_input;
         }
 
-      do
-        {
-          if (!g_input_stream_read_all (read_object_in, buf, sizeof(buf), &bytes_read, cancellable, error))
-            goto out;
-          if (!g_output_stream_write_all ((GOutputStream*)object_data_stream, buf, bytes_read, &bytes_written, cancellable, error))
-            goto out;
-        }
-      while (bytes_read > 0);
-
-      if (!g_input_stream_close (read_object_in, cancellable, error))
+      if (!g_output_stream_splice ((GOutputStream*)object_data_stream, read_object_in,
+                                   G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET,
+                                   cancellable, error))
         goto out;
 
       ot_clear_gvariant (&packed_object);
@@ -448,6 +439,8 @@ create_pack_file (OtRepackData        *data,
       goto out;
     }
   g_clear_object (&index_temppath);
+
+  g_print ("Created pack file '%s' with %u objects\n", g_checksum_get_string (pack_checksum), objects->len);
 
   ret = TRUE;
  out:
