@@ -280,6 +280,12 @@ gboolean ostree_repo_list_pack_indexes (OstreeRepo              *self,
                                         GCancellable            *cancellable,
                                         GError                 **error);
 
+GFile * ostree_repo_get_pack_index_path (OstreeRepo         *self,
+                                         const char         *checksum);
+
+GFile * ostree_repo_get_pack_data_path (OstreeRepo         *self,
+                                        const char         *checksum);
+
 G_END_DECLS
 
 #endif /* _OSTREE_REPO */

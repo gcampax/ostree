@@ -353,12 +353,8 @@ create_pack_file (OtRepackData        *data,
         {
           if (!g_input_stream_read_all (read_object_in, buf, sizeof(buf), &bytes_read, cancellable, error))
             goto out;
-          if (bytes_read > 0)
-            {
-              g_checksum_update (pack_checksum, (guint8*)buf, bytes_read);
-              if (!g_output_stream_write_all ((GOutputStream*)object_data_stream, buf, bytes_read, &bytes_written, cancellable, error))
-                goto out;
-            }
+          if (!g_output_stream_write_all ((GOutputStream*)object_data_stream, buf, bytes_read, &bytes_written, cancellable, error))
+            goto out;
         }
       while (bytes_read > 0);
 

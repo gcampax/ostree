@@ -26,6 +26,7 @@
 #include "ostree.h"
 
 #include <glib/gi18n.h>
+#include <glib/gprintf.h>
 
 static gboolean quiet;
 static gboolean delete;
@@ -123,6 +124,29 @@ checksum_archived_file (OtFsckData   *data,
   return ret;
 }
 
+static void
+encountered_fsck_error (OtFsckData  *data,
+                        const char  *fmt,
+                        ...) G_GNUC_PRINTF (2, 3);
+
+static void
+encountered_fsck_error (OtFsckData  *data,
+                        const char  *fmt,
+                        ...)
+{
+  va_list args;
+  char *msg;
+
+  va_start (args, fmt);
+
+  g_vasprintf (&msg, fmt, args);
+  g_printerr ("ERROR: %s\n", msg);
+  data->had_error = TRUE;
+
+  va_end (args);
+}
+                        
+
 static gboolean
 fsck_loose_object (OtFsckData    *data,
                    const char    *exp_checksum,
@@ -158,9 +182,9 @@ fsck_loose_object (OtFsckData    *data,
 
   if (real_checksum && strcmp (exp_checksum, g_checksum_get_string (real_checksum)) != 0)
     {
-      data->had_error = TRUE;
-      g_printerr ("ERROR: corrupted object '%s'; actual checksum: %s\n",
-                  ot_gfile_get_path_cached (objf), g_checksum_get_string (real_checksum));
+
+      encountered_fsck_error (data, "corrupted object '%s'; actual checksum: %s",
+                              ot_gfile_get_path_cached (objf), g_checksum_get_string (real_checksum));
       if (delete)
         (void) unlink (ot_gfile_get_path_cached (objf));
     }
@@ -172,6 +196,57 @@ fsck_loose_object (OtFsckData    *data,
   ot_clear_checksum (&real_checksum);
   return ret;
 }
+
+static gboolean
+fsck_pack_files (OtFsckData  *data,
+                 GCancellable   *cancellable,
+                 GError        **error)
+{
+  gboolean ret = FALSE;
+  GPtrArray *pack_indexes = NULL;
+  GFile *pack_data_path = NULL;
+  GInputStream *input = NULL;
+  GChecksum *pack_content_checksum = NULL;
+  guint i;
+
+  if (!ostree_repo_list_pack_indexes (data->repo, &pack_indexes, cancellable, error))
+    goto out;
+
+  for (i = 0; i < pack_indexes->len; i++)
+    {
+      const char *checksum = pack_indexes->pdata[i];
+
+      g_clear_object (&pack_data_path);
+      pack_data_path = ostree_repo_get_pack_data_path (data->repo, checksum);
+      
+      g_clear_object (&input);
+      input = (GInputStream*)g_file_read (pack_data_path, cancellable, error);
+      if (!input)
+        goto out;
+     
+      if (pack_content_checksum)
+        g_checksum_free (pack_content_checksum);
+      if (!ot_gio_checksum_stream (input, &pack_content_checksum, cancellable, error))
+        goto out;
+
+      if (strcmp (g_checksum_get_string (pack_content_checksum), checksum) != 0)
+        {
+          encountered_fsck_error (data, "corrupted pack '%s', expected checksum %s",
+                                  checksum, g_checksum_get_string (pack_content_checksum));
+        }
+    }
+
+  ret = TRUE;
+ out:
+  if (pack_content_checksum)
+    g_checksum_free (pack_content_checksum);
+  if (pack_indexes)
+    g_ptr_array_unref (pack_indexes);
+  g_clear_object (&pack_data_path);
+  g_clear_object (&input);
+  return ret;
+}
+
 
 gboolean
 ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
@@ -223,6 +298,9 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
             goto out;
         }
     }
+
+  if (!fsck_pack_files (&data, cancellable, error))
+    goto out;
 
   if (data.had_error)
     {

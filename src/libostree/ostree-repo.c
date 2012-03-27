@@ -2476,9 +2476,9 @@ get_checksum_from_pack_name (const char *name)
   return g_strndup (dash + 1, 64);
 }
 
-static GFile *
-get_pack_index_path (OstreeRepo *self,
-                     const char *checksum)
+GFile *
+ostree_repo_get_pack_index_path (OstreeRepo *self,
+                                 const char *checksum)
 {
   char *name;
   GFile *ret;
@@ -2490,9 +2490,9 @@ get_pack_index_path (OstreeRepo *self,
   return ret;
 }
 
-static GFile *
-get_pack_data_path (OstreeRepo *self,
-                    const char *checksum)
+GFile *
+ostree_repo_get_pack_data_path (OstreeRepo *self,
+                                const char *checksum)
 {
   char *name;
   GFile *ret;
@@ -2524,7 +2524,7 @@ ostree_repo_load_pack_index (OstreeRepo    *self,
     }
   else
     {
-      path = get_pack_index_path (self, sha256);
+      path = ostree_repo_get_pack_index_path (self, sha256);
       if (!ot_util_variant_map (path,
                                 OSTREE_PACK_INDEX_VARIANT_FORMAT,
                                 &ret_variant, error))
@@ -2579,7 +2579,7 @@ ostree_repo_map_pack_file (OstreeRepo    *self,
   map = g_hash_table_lookup (priv->pack_data_mappings, sha256);
   if (map == NULL)
     {
-      path = get_pack_data_path (self, sha256);
+      path = ostree_repo_get_pack_data_path (self, sha256);
 
       map = g_mapped_file_new (ot_gfile_get_path_cached (path), FALSE, error);
       if (!map)
@@ -2923,7 +2923,7 @@ list_objects_in_index (OstreeRepo                     *self,
   guint32 objtype_u32;
   guint64 offset;
 
-  index_path = get_pack_index_path (self, pack_checksum);
+  index_path = ostree_repo_get_pack_index_path (self, pack_checksum);
 
   if (!ostree_repo_load_pack_index (self, pack_checksum, &index_variant, cancellable, error))
     goto out;
@@ -3077,7 +3077,7 @@ find_object_in_packs (OstreeRepo        *self,
       guint64 offset;
 
       g_clear_object (&index_path);
-      index_path = get_pack_index_path (self, pack_checksum);
+      index_path = ostree_repo_get_pack_index_path (self, pack_checksum);
 
       ot_clear_gvariant (&index_variant);
       if (!ostree_repo_load_pack_index (self, pack_checksum, &index_variant, cancellable, error))

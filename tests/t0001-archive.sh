@@ -21,7 +21,7 @@ set -e
 
 . libtest.sh
 
-echo '1..14'
+echo '1..16'
 
 setup_test_repository "archive"
 echo "ok setup"
@@ -72,12 +72,20 @@ cd ${test_tmpdir}
 $OSTREE repack --keep-loose
 echo "ok repack"
 
+cd ${test_tmpdir}
+$OSTREE fsck
+echo "ok fsck"
+
 $OSTREE checkout test2 checkout-test2-from-packed
 echo "ok checkout union 1"
 
 cd ${test_tmpdir}
 $OSTREE repack
 echo "ok repack delete loose"
+
+cd ${test_tmpdir}
+$OSTREE fsck
+echo "ok fsck"
 
 $OSTREE repack --analyze-only
 echo "ok repack analyze"
