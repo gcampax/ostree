@@ -724,39 +724,46 @@ bsearch_in_file_variant (GVariant  *variant,
                          const char *name,
                          int        *out_pos)
 {
-  int i, n;
-  int m;
+  gsize imax, imin;
+  gsize imid;
+  gsize n;
 
-  i = 0;
-  n = g_variant_n_children (variant) - 1;
-  m = 0;
+  n = g_variant_n_children (variant);
+  if (n == 0)
+    return FALSE;
 
-  while (i <= n)
+  imax = n - 1;
+  imin = 0;
+  while (imax >= imin)
     {
       GVariant *child;
       const char *cur;
       int cmp;
 
-      m = i + ((n - i) / 2);
+      imid = (imin + imax) / 2;
 
-      child = g_variant_get_child_value (variant, m);
+      child = g_variant_get_child_value (variant, imid);
       g_variant_get_child (child, 0, "&s", &cur, NULL);      
 
       cmp = strcmp (cur, name);
       if (cmp < 0)
-        i = m + 1;
+        imin = imid + 1;
       else if (cmp > 0)
-        n = m - 1;
+        {
+          if (imid == 0)
+            break;
+          imax = imid - 1;
+        }
       else
         {
           ot_clear_gvariant (&child);
-          *out_pos = m;
+          *out_pos = imid;
           return TRUE;
         }
       ot_clear_gvariant (&child);
     }
 
-  *out_pos = m;
+  *out_pos = imid;
   return FALSE;
 }
 

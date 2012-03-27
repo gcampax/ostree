@@ -21,7 +21,7 @@ set -e
 
 . libtest.sh
 
-echo '1..13'
+echo '1..14'
 
 setup_test_repository "archive"
 echo "ok setup"
@@ -69,12 +69,15 @@ assert_file_has_content cow-contents "moo"
 echo "ok cat-file"
 
 cd ${test_tmpdir}
-$OSTREE repack
+$OSTREE repack --keep-loose
 echo "ok repack"
-
-cd ${test_tmpdir}
-$OSTREE repack
-echo "ok repack again"
 
 $OSTREE checkout test2 checkout-test2-from-packed
 echo "ok checkout union 1"
+
+cd ${test_tmpdir}
+$OSTREE repack
+echo "ok repack delete loose"
+
+$OSTREE repack --analyze-only
+echo "ok repack analyze"

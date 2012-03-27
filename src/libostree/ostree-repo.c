@@ -40,6 +40,9 @@
 #include "ostree-libarchive-input-stream.h"
 #endif
 
+#define ALIGN_VALUE(this, boundary) \
+  (( ((unsigned long)(this)) + (((unsigned long)(boundary)) -1)) & (~(((unsigned long)(boundary))-1)))
+
 enum {
   PROP_0,
 
@@ -2590,13 +2593,12 @@ ostree_repo_map_pack_file (OstreeRepo    *self,
   ret_len = (guint64)g_mapped_file_get_length (map);
 
   ret = TRUE;
-  ot_transfer_out_value (out_data, &ret_data);
+  if (out_data)
+    *out_data = ret_data;
   if (out_len)
     *out_len = ret_len;
  out:
   g_clear_object (&path);
-  if (ret_data)
-    g_mapped_file_unref (ret_data);
   return ret;
 }
 
@@ -2606,25 +2608,32 @@ bsearch_in_pack_index (GVariant   *index_contents,
                        OstreeObjectType objtype,
                        guint64    *out_offset)
 {
+  gsize imax, imin;
   gsize n;
-  gsize i;
-  gsize m;
   guint32 target_objtype = (guint32) objtype;
 
-  i = 0;
-  n = g_variant_n_children (index_contents) - 1;
-  m = 0;
+  n = g_variant_n_children (index_contents);
 
-  while (i <= n)
+  if (n == 0)
+    return FALSE;
+
+  imax = n - 1;
+  imin = 0;
+  while (imax >= imin)
     {
       GVariant *cur_csum_bytes;
       guint32 cur_objtype;
       guint64 cur_offset;
+      gsize imid;
       int c;
 
-      m = i + ((n - i) / 2);
+      imid = (imin + imax) / 2;
 
-      g_variant_get_child (index_contents, m, "(u@ayt)", &cur_objtype, &cur_csum_bytes, &cur_offset);      
+      g_variant_get_child (index_contents, imid, "(u@ayt)", &cur_objtype,
+                           &cur_csum_bytes, &cur_offset);      
+      cur_objtype = GUINT32_FROM_BE (cur_objtype);
+      cur_offset = GUINT64_FROM_BE (cur_offset);
+
       c = ostree_cmp_checksum_bytes (cur_csum_bytes, csum_bytes);
       if (c == 0)
         {
@@ -2636,9 +2645,13 @@ bsearch_in_pack_index (GVariant   *index_contents,
       g_variant_unref (cur_csum_bytes);
 
       if (c < 0)
-        i = m + 1;
+        imin = imid + 1;
       else if (c > 0)
-        n = m - 1;
+        {
+          if (imid == 0)
+            break;
+          imax = imid - 1;
+        }
       else
         {
           *out_offset = cur_offset;
@@ -2679,23 +2692,24 @@ read_pack_entry (gboolean       trusted,
       goto out;
     }
 
-  g_assert ((((guint64)pack_data+offset) & 0x3) == 0);
-  entry_len = GUINT32_FROM_BE (*((guint32*)(pack_data+offset)));
-  entry_end = offset + entry_len;
-  if (G_UNLIKELY (!(entry_end < pack_len)))
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted pack index; out of range entry length %u",
-                   entry_len);
-      goto out;
-    }
-
-  entry_start = offset + 4;
+  entry_start = ALIGN_VALUE (offset + 4, 8);
   if (G_UNLIKELY (!(entry_start < pack_len)))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Corrupted pack index; out of range data offset %" G_GUINT64_FORMAT,
                    entry_start);
+      goto out;
+    }
+
+  g_assert ((((guint64)pack_data+offset) & 0x3) == 0);
+  entry_len = GUINT32_FROM_BE (*((guint32*)(pack_data+offset)));
+
+  entry_end = entry_start + entry_len;
+  if (G_UNLIKELY (!(entry_end < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range entry length %u",
+                   entry_len);
       goto out;
     }
 
@@ -2721,7 +2735,6 @@ get_pack_entry_stream (GVariant        *pack_entry)
 
   g_variant_get_child (pack_entry, 1, "y", &entry_flags);
   g_variant_get_child (pack_entry, 3, "@ay", &pack_data);
-  g_variant_ref_sink (pack_data);
 
   data_ptr = g_variant_get_fixed_array (pack_data, &data_len, 1);
   memory_input = g_memory_input_stream_new_from_data (data_ptr, data_len, NULL);
@@ -2749,22 +2762,37 @@ get_pack_entry_stream (GVariant        *pack_entry)
   return ret_input;
 }
 
-static GVariant *
+static gboolean
 get_pack_entry_as_variant (GVariant            *pack_entry,
                            const GVariantType  *type,
-                           gboolean             trusted)
+                           gboolean             trusted,
+                           GVariant           **out_variant,
+                           GCancellable        *cancellable,
+                           GError             **error)
 {
-  GVariant *pack_data;
+  gboolean ret = FALSE;
+  GInputStream *stream;
+  GMemoryOutputStream *data_stream;
   GVariant *ret_variant;
-  gconstpointer data_ptr;
-  gsize data_len;
 
-  g_variant_get_child (pack_entry, 3, "@ay", &pack_data);
-  data_ptr = g_variant_get_fixed_array (pack_data, &data_len, 1);
-  ret_variant = g_variant_new_from_data (type, data_ptr, data_len, trusted,
-                                         (GDestroyNotify)g_variant_unref,
-                                         pack_data);
-  return ret_variant;
+  stream = get_pack_entry_stream (pack_entry);
+  
+  data_stream = (GMemoryOutputStream*)g_memory_output_stream_new (NULL, 0, g_realloc, g_free);
+
+  if (!g_output_stream_splice ((GOutputStream*)data_stream, stream,
+                               G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET,
+                               cancellable, error))
+    goto out;
+
+  ret_variant = g_variant_new_from_data (type, g_memory_output_stream_get_data (data_stream),
+                                         g_memory_output_stream_get_data_size (data_stream),
+                                         trusted, (GDestroyNotify) g_object_unref, data_stream);
+
+  ret = TRUE;
+  g_variant_ref_sink (ret_variant);
+  ot_transfer_out_value (out_variant, &ret_variant);
+ out:
+  return ret;
 }
 
 gboolean
@@ -3056,12 +3084,12 @@ find_object_in_packs (OstreeRepo        *self,
         goto out;
 
       ot_clear_gvariant (&index_contents);
-      index_contents = g_variant_get_child_value (index_variant, 3);
+      index_contents = g_variant_get_child_value (index_variant, 2);
       
       if (!bsearch_in_pack_index (index_contents, csum_bytes, objtype, &offset))
         continue;
 
-      ret_pack_checksum = g_strdup (checksum);
+      ret_pack_checksum = g_strdup (pack_checksum);
       ret_pack_offset = offset;
       break;
     }
@@ -3174,7 +3202,7 @@ ostree_repo_load_variant (OstreeRepo  *self,
       if (!ostree_map_metadata_file (object_path, expected_type, &ret_variant, error))
         goto out;
     }
-  else
+  else if (pack_checksum != NULL)
     {
       guint32 actual_type;
 
@@ -3186,12 +3214,13 @@ ostree_repo_load_variant (OstreeRepo  *self,
                             cancellable, error))
         goto out;
 
-      container_variant = get_pack_entry_as_variant (packed_object, OSTREE_SERIALIZED_VARIANT_FORMAT, TRUE);
+      if (!get_pack_entry_as_variant (packed_object, OSTREE_SERIALIZED_VARIANT_FORMAT, TRUE, &container_variant,
+                                      cancellable, error))
+        goto out;
       
       g_variant_get (container_variant, "(uv)",
                      &actual_type, &ret_variant);
       actual_type = GUINT32_FROM_BE (actual_type);
-      ot_util_variant_take_ref (ret_variant);
 
       if (actual_type != expected_type)
         {
@@ -3200,6 +3229,13 @@ ostree_repo_load_variant (OstreeRepo  *self,
                        sha256, actual_type, (guint32)expected_type);
           goto out;
         }
+    }
+  else
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "No such metadata object %s.%s",
+                   sha256, ostree_object_type_to_string (expected_type));
+      goto out;
     }
 
   ret = TRUE;

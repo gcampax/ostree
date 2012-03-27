@@ -109,8 +109,8 @@ write_bytes_update_checksum (GOutputStream *output,
       if (!g_output_stream_write_all (output, bytes, len, &bytes_written,
                                       cancellable, error))
         goto out;
-      g_assert (bytes_written == len);
-      *inout_offset += len;
+      g_assert_cmpint (bytes_written, ==, len);
+      *inout_offset += bytes_written;
     }
   
   ret = TRUE;
@@ -128,7 +128,8 @@ write_padding (GOutputStream    *output,
 {
   gboolean ret = FALSE;
   guint bits;
-  char padding_nuls[7] = {0, 0, 0, 0, 0, 0, 0};
+  guint padding_len;
+  guchar padding_nuls[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
   if (alignment == 8)
     bits = ((*inout_offset) & 7);
@@ -137,7 +138,8 @@ write_padding (GOutputStream    *output,
 
   if (bits > 0)
     {
-      if (!write_bytes_update_checksum (output, (guchar*)padding_nuls, alignment - bits,
+      padding_len = alignment - bits;
+      if (!write_bytes_update_checksum (output, (guchar*)padding_nuls, padding_len,
                                         checksum, inout_offset, cancellable, error))
         goto out;
     }
@@ -173,6 +175,8 @@ write_variant_with_size (GOutputStream      *output,
   /* Pad to offset of 8, write variant */
   if (!write_padding (output, 8, checksum, inout_offset, cancellable, error))
     goto out;
+  g_assert ((*inout_offset & 7) == 0);
+
   if (!write_bytes_update_checksum (output, g_variant_get_data (variant),
                                     variant_size, checksum,
                                     inout_offset, cancellable, error))
@@ -201,6 +205,8 @@ compare_index_content (gconstpointer         ap,
 
   g_variant_get (a_v, "(u@ayt)", &a_objtype, &a_csum_bytes, &a_offset);      
   g_variant_get (b_v, "(u@ayt)", &b_objtype, &b_csum_bytes, &b_offset);      
+  a_objtype = GUINT32_FROM_BE (a_objtype);
+  b_objtype = GUINT32_FROM_BE (b_objtype);
   c = ostree_cmp_checksum_bytes (a_csum_bytes, b_csum_bytes);
   if (c == 0)
     {
@@ -292,36 +298,17 @@ create_pack_file (OtRepackData        *data,
                      
       objtype = (OstreeObjectType) objtype_u32;
 
-      if (!write_padding (pack_out, 4, pack_checksum, &offset, cancellable, error))
-        goto out;
-
-      /* offset points to aligned header size */
-      index_entry = g_variant_new ("(u@ayt)",
-                                   GUINT32_TO_BE ((guint32)objtype),
-                                   ostree_checksum_to_bytes (checksum),
-                                   offset);
-      g_ptr_array_add (index_content_list, g_variant_ref_sink (index_entry));
-
-      if (objtype == OSTREE_OBJECT_TYPE_DIR_TREE
-          || objtype == OSTREE_OBJECT_TYPE_DIR_META
-          || objtype == OSTREE_OBJECT_TYPE_COMMIT)
+      switch (data->int_compression)
         {
-          ;
-        }
-      else
-        {
-          switch (data->int_compression)
-            {
-            case OT_COMPRESSION_GZIP:
-              {
-                entry_flags |= OSTREE_PACK_FILE_ENTRY_FLAG_GZIP;
-                break;
-              }
-            default:
-              {
-                g_assert_not_reached ();
-              }
-            }
+        case OT_COMPRESSION_GZIP:
+          {
+            entry_flags |= OSTREE_PACK_FILE_ENTRY_FLAG_GZIP;
+            break;
+          }
+        default:
+          {
+            g_assert_not_reached ();
+          }
         }
 
       g_clear_object (&object_path);
@@ -369,7 +356,7 @@ create_pack_file (OtRepackData        *data,
           if (bytes_read > 0)
             {
               g_checksum_update (pack_checksum, (guint8*)buf, bytes_read);
-              if (!g_output_stream_write_all (pack_out, buf, bytes_read, &bytes_written, cancellable, error))
+              if (!g_output_stream_write_all ((GOutputStream*)object_data_stream, buf, bytes_read, &bytes_written, cancellable, error))
                 goto out;
             }
         }
@@ -379,14 +366,27 @@ create_pack_file (OtRepackData        *data,
         goto out;
 
       ot_clear_gvariant (&packed_object);
-      packed_object = g_variant_new ("(uy@ay@ay)", GUINT32_TO_BE ((guint32)objtype),
-                                     entry_flags,
-                                     g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
-                                                                g_memory_output_stream_get_data (object_data_stream),
-                                                                g_memory_output_stream_get_data_size (object_data_stream),
-                                                                1),
-                                     ostree_checksum_to_bytes (checksum));
-      g_clear_object (&object_data_stream);
+      {
+        guchar *data = g_memory_output_stream_get_data (object_data_stream);
+        gsize data_len = g_memory_output_stream_get_data_size (object_data_stream);
+        packed_object = g_variant_new ("(uy@ay@ay)", GUINT32_TO_BE ((guint32)objtype),
+                                       entry_flags,
+                                       ostree_checksum_to_bytes (checksum),
+                                       g_variant_new_fixed_array (G_VARIANT_TYPE ("y"),
+                                                                  data, data_len,
+                                                                  1));
+        g_clear_object (&object_data_stream);
+      }
+
+      if (!write_padding (pack_out, 4, pack_checksum, &offset, cancellable, error))
+        goto out;
+
+      /* offset points to aligned header size */
+      index_entry = g_variant_new ("(u@ayt)",
+                                   GUINT32_TO_BE ((guint32)objtype),
+                                   ostree_checksum_to_bytes (checksum),
+                                   GUINT64_TO_BE (offset));
+      g_ptr_array_add (index_content_list, g_variant_ref_sink (index_entry));
 
       if (!write_variant_with_size (pack_out, packed_object, pack_checksum,
                                     &offset, cancellable, error))
@@ -554,14 +554,19 @@ cluster_objects_stupidly (OtRepackData      *data,
       if (current_size + objsize > data->pack_size || i == (object_list->len - 1))
         {
           guint j;
-          GPtrArray *current = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
-          for (j = current_offset; j < i; j++)
+          GPtrArray *current;
+
+          if (current_offset < i)
             {
-              g_ptr_array_add (current, g_variant_ref (object_list->pdata[j]));
+              current = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
+              for (j = current_offset; j < i; j++)
+                {
+                  g_ptr_array_add (current, g_variant_ref (object_list->pdata[j]));
+                }
+              g_ptr_array_add (ret_clusters, current);
+              current_size = objsize;
+              current_offset = i;
             }
-          g_ptr_array_add (ret_clusters, current);
-          current_size = objsize;
-          current_offset = i;
         }
       else if (objsize > data->pack_size)
         {
@@ -708,24 +713,20 @@ do_stats_gather_loose (OtRepackData  *data,
       
       if (is_loose && is_packed)
         {
-          g_print ("loose+packed: %s.%u\n", checksum, objtype);
           n_loose_and_packed++;
         }
       else if (is_loose)
         {
           GVariant *copy = g_variant_ref (serialized_key);
           g_hash_table_replace (ret_loose, copy, copy);
-          g_print ("loose: %s.%u\n", checksum, objtype);
           n_loose++;
         }
       else if (g_variant_n_children (pack_array) > 1)
         {
-          g_print ("dup-packed: %s.%u\n", checksum, objtype);
           n_dup_packed++;
         }
       else
         {
-          g_print ("packed: %s.%u\n", checksum, objtype);
           n_packed++;
         }
           
@@ -834,8 +835,6 @@ ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
   for (i = 0; i < clusters->len; i++)
     {
       GPtrArray *cluster = clusters->pdata[i];
-      
-      g_print ("%u: %u objects\n", i, cluster->len);
       
       if (!opt_analyze_only)
         {
