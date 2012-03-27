@@ -309,7 +309,7 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
       goto out;
     }
   if (!quiet)
-    g_printerr ("Total Objects: %u\n", data.n_objects);
+    g_print ("Total Objects: %u\n", data.n_objects);
 
   ret = TRUE;
  out:
