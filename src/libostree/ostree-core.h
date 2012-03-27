@@ -265,14 +265,21 @@ gboolean ostree_parse_archived_file_meta (GVariant         *data,
                                           GVariant        **out_xattrs,
                                           GError          **error);
 
-gboolean ostree_read_pack_entry (guchar           *pack_data,
-                                 guint64           pack_len,
-                                 guint64           object_offset,
-                                 gboolean          trusted,
-                                 GVariant        **out_entry,
-                                 GCancellable     *cancellable,
-                                 GError          **error);
+gboolean ostree_read_pack_entry_raw (guchar           *pack_data,
+                                     guint64           pack_len,
+                                     guint64           object_offset,
+                                     gboolean          trusted,
+                                     GVariant        **out_entry,
+                                     GCancellable     *cancellable,
+                                     GError          **error);
 
 GInputStream *ostree_read_pack_entry_as_stream (GVariant *pack_entry);
+
+gboolean ostree_read_pack_entry_variant (GVariant         *pack_entry,
+                                         OstreeObjectType  expected_objtype,
+                                         gboolean          trusted,
+                                         GVariant        **out_variant,
+                                         GCancellable     *cancellable,
+                                         GError          **error);
 
 #endif /* _OSTREE_REPO */

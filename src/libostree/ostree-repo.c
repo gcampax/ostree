@@ -2659,39 +2659,6 @@ bsearch_in_pack_index (GVariant   *index_contents,
   return FALSE;
 }
 
-static gboolean
-get_pack_entry_as_variant (GVariant            *pack_entry,
-                           const GVariantType  *type,
-                           gboolean             trusted,
-                           GVariant           **out_variant,
-                           GCancellable        *cancellable,
-                           GError             **error)
-{
-  gboolean ret = FALSE;
-  GInputStream *stream;
-  GMemoryOutputStream *data_stream;
-  GVariant *ret_variant;
-
-  stream = ostree_read_pack_entry_as_stream (pack_entry);
-  
-  data_stream = (GMemoryOutputStream*)g_memory_output_stream_new (NULL, 0, g_realloc, g_free);
-
-  if (!g_output_stream_splice ((GOutputStream*)data_stream, stream,
-                               G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET,
-                               cancellable, error))
-    goto out;
-
-  ret_variant = g_variant_new_from_data (type, g_memory_output_stream_get_data (data_stream),
-                                         g_memory_output_stream_get_data_size (data_stream),
-                                         trusted, (GDestroyNotify) g_object_unref, data_stream);
-
-  ret = TRUE;
-  g_variant_ref_sink (ret_variant);
-  ot_transfer_out_value (out_variant, &ret_variant);
- out:
-  return ret;
-}
-
 gboolean
 ostree_repo_load_file (OstreeRepo         *self,
                        const char         *checksum,
@@ -2756,9 +2723,9 @@ ostree_repo_load_file (OstreeRepo         *self,
                                               &content_pack_data, &content_pack_len,
                                               cancellable, error))
                 goto out;
-              if (!ostree_read_pack_entry (content_pack_data, content_pack_len,
-                                           content_pack_offset, TRUE,
-                                           &packed_object, cancellable, error))
+              if (!ostree_read_pack_entry_raw (content_pack_data, content_pack_len,
+                                               content_pack_offset, TRUE,
+                                               &packed_object, cancellable, error))
                 goto out;
               ret_input = ostree_read_pack_entry_as_stream (packed_object);
             }
@@ -3071,7 +3038,7 @@ out:
 
 gboolean
 ostree_repo_load_variant (OstreeRepo  *self,
-                          OstreeObjectType  expected_type,
+                          OstreeObjectType  objtype,
                           const char    *sha256, 
                           GVariant     **out_variant,
                           GError       **error)
@@ -3087,9 +3054,9 @@ ostree_repo_load_variant (OstreeRepo  *self,
   guint64 object_offset;
   GCancellable *cancellable = NULL;
 
-  g_return_val_if_fail (OSTREE_OBJECT_TYPE_IS_META (expected_type), FALSE);
+  g_return_val_if_fail (OSTREE_OBJECT_TYPE_IS_META (objtype), FALSE);
 
-  if (!ostree_repo_find_object (self, expected_type, sha256, &object_path, NULL,
+  if (!ostree_repo_find_object (self, objtype, sha256, &object_path, NULL,
                                 &pack_checksum, &object_offset,
                                 cancellable, error))
     goto out;
@@ -3097,7 +3064,7 @@ ostree_repo_load_variant (OstreeRepo  *self,
   /* Prefer loose metadata for now */
   if (object_path != NULL)
     {
-      if (!ostree_map_metadata_file (object_path, expected_type, &ret_variant, error))
+      if (!ostree_map_metadata_file (object_path, objtype, &ret_variant, error))
         goto out;
     }
   else if (pack_checksum != NULL)
@@ -3108,31 +3075,19 @@ ostree_repo_load_variant (OstreeRepo  *self,
                                       cancellable, error))
         goto out;
       
-      if (!ostree_read_pack_entry (pack_data, pack_len, object_offset,
-                                   TRUE, &packed_object, cancellable, error))
+      if (!ostree_read_pack_entry_raw (pack_data, pack_len, object_offset,
+                                       TRUE, &packed_object, cancellable, error))
         goto out;
 
-      if (!get_pack_entry_as_variant (packed_object, OSTREE_SERIALIZED_VARIANT_FORMAT, TRUE,
-                                      &container_variant, cancellable, error))
+      if (!ostree_read_pack_entry_variant (packed_object, objtype, TRUE,
+                                           &container_variant, cancellable, error))
         goto out;
-      
-      g_variant_get (container_variant, "(uv)",
-                     &actual_type, &ret_variant);
-      actual_type = GUINT32_FROM_BE (actual_type);
-
-      if (actual_type != expected_type)
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Corrupted metadata object '%s'; found type %u, expected %u",
-                       sha256, actual_type, (guint32)expected_type);
-          goto out;
-        }
     }
   else
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "No such metadata object %s.%s",
-                   sha256, ostree_object_type_to_string (expected_type));
+                   sha256, ostree_object_type_to_string (objtype));
       goto out;
     }
 

@@ -1212,13 +1212,13 @@ ostree_create_temp_hardlink (GFile            *dir,
 }
 
 gboolean
-ostree_read_pack_entry (guchar        *pack_data,
-                        guint64        pack_len,
-                        guint64        offset,
-                        gboolean       trusted,
-                        GVariant     **out_entry,
-                        GCancellable  *cancellable,
-                        GError       **error)
+ostree_read_pack_entry_raw (guchar        *pack_data,
+                            guint64        pack_len,
+                            guint64        offset,
+                            gboolean       trusted,
+                            GVariant     **out_entry,
+                            GCancellable  *cancellable,
+                            GError       **error)
 {
   gboolean ret = FALSE;
   GVariant *ret_entry = NULL;
@@ -1310,3 +1310,58 @@ ostree_read_pack_entry_as_stream (GVariant *pack_entry)
 
   return ret_input;
 }
+
+
+gboolean
+ostree_read_pack_entry_variant (GVariant            *pack_entry,
+                                OstreeObjectType     expected_objtype,
+                                gboolean             trusted,
+                                GVariant           **out_variant,
+                                GCancellable        *cancellable,
+                                GError             **error)
+{
+  gboolean ret = FALSE;
+  GInputStream *stream = NULL;
+  GMemoryOutputStream *data_stream = NULL;
+  GVariant *container_variant = NULL;
+  GVariant *ret_variant = NULL;
+  guint32 actual_type;
+
+  stream = ostree_read_pack_entry_as_stream (pack_entry);
+  
+  data_stream = (GMemoryOutputStream*)g_memory_output_stream_new (NULL, 0, g_realloc, g_free);
+
+  if (!g_output_stream_splice ((GOutputStream*)data_stream, stream,
+                               G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET,
+                               cancellable, error))
+    goto out;
+
+  container_variant = g_variant_new_from_data (OSTREE_SERIALIZED_VARIANT_FORMAT,
+                                               g_memory_output_stream_get_data (data_stream),
+                                               g_memory_output_stream_get_data_size (data_stream),
+                                               trusted, (GDestroyNotify) g_object_unref, data_stream);
+  data_stream = NULL; /* Transfer ownership */
+
+  g_variant_get (container_variant, "(uv)",
+                 &actual_type, &ret_variant);
+  actual_type = GUINT32_FROM_BE (actual_type);
+
+  if (actual_type != expected_objtype)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted metadata object in pack file; found type %u, expected %u",
+                   actual_type, (guint32)expected_objtype);
+      goto out;
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_variant, &ret_variant);
+ out:
+  g_clear_object (&stream);
+  g_clear_object (&data_stream);
+  ot_clear_gvariant (&ret_variant);
+  ot_clear_gvariant (&container_variant);
+  return ret;
+}
+
+
