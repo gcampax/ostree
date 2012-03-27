@@ -759,7 +759,7 @@ do_stats_gather_loose (OtRepackData  *data,
 }
 
 gboolean
-ostree_builtin_repack (int argc, char **argv, GFile *repo_path, GError **error)
+ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
 {
   gboolean ret = FALSE;
   GOptionContext *context;

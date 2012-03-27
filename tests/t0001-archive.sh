@@ -69,8 +69,8 @@ assert_file_has_content cow-contents "moo"
 echo "ok cat-file"
 
 cd ${test_tmpdir}
-$OSTREE repack --keep-loose
-echo "ok repack"
+$OSTREE pack --keep-loose
+echo "ok pack"
 
 cd ${test_tmpdir}
 $OSTREE fsck
@@ -80,12 +80,12 @@ $OSTREE checkout test2 checkout-test2-from-packed
 echo "ok checkout union 1"
 
 cd ${test_tmpdir}
-$OSTREE repack
-echo "ok repack delete loose"
+$OSTREE pack
+echo "ok pack delete loose"
 
 cd ${test_tmpdir}
 $OSTREE fsck
 echo "ok fsck"
 
-$OSTREE repack --analyze-only
-echo "ok repack analyze"
+$OSTREE pack --analyze-only
+echo "ok pack analyze"
