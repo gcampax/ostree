@@ -28,6 +28,9 @@
 #include <sys/types.h>
 #include <attr/xattr.h>
 
+#define ALIGN_VALUE(this, boundary) \
+  (( ((unsigned long)(this)) + (((unsigned long)(boundary)) -1)) & (~(((unsigned long)(boundary))-1)))
+
 gboolean
 ostree_validate_checksum_string (const char *sha256,
                                  GError    **error)
@@ -1206,4 +1209,104 @@ ostree_create_temp_hardlink (GFile            *dir,
   g_free (possible_name);
   g_clear_object (&possible_file);
   return ret;
+}
+
+gboolean
+ostree_read_pack_entry (guchar        *pack_data,
+                        guint64        pack_len,
+                        guint64        offset,
+                        gboolean       trusted,
+                        GVariant     **out_entry,
+                        GCancellable  *cancellable,
+                        GError       **error)
+{
+  gboolean ret = FALSE;
+  GVariant *ret_entry = NULL;
+  guint64 entry_start;
+  guint64 entry_end;
+  guint32 entry_len;
+
+  if (G_UNLIKELY (!(offset < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range offset %" G_GUINT64_FORMAT,
+                   offset);
+      goto out;
+    }
+  if (G_UNLIKELY (!((offset & 0x3) == 0)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; unaligned offset %" G_GUINT64_FORMAT,
+                   offset);
+      goto out;
+    }
+
+  entry_start = ALIGN_VALUE (offset + 4, 8);
+  if (G_UNLIKELY (!(entry_start < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range data offset %" G_GUINT64_FORMAT,
+                   entry_start);
+      goto out;
+    }
+
+  g_assert ((((guint64)pack_data+offset) & 0x3) == 0);
+  entry_len = GUINT32_FROM_BE (*((guint32*)(pack_data+offset)));
+
+  entry_end = entry_start + entry_len;
+  if (G_UNLIKELY (!(entry_end < pack_len)))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted pack index; out of range entry length %u",
+                   entry_len);
+      goto out;
+    }
+
+  ret_entry = g_variant_new_from_data (OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT,
+                                       pack_data+entry_start, entry_len,
+                                       trusted, NULL, NULL);
+  ret = TRUE;
+  ot_transfer_out_value (out_entry, &ret_entry);
+ out:
+  ot_clear_gvariant (&ret_entry);
+  return ret;
+}
+
+GInputStream *
+ostree_read_pack_entry_as_stream (GVariant *pack_entry)
+{
+  GInputStream *memory_input;
+  GInputStream *ret_input = NULL;
+  GVariant *pack_data = NULL;
+  guchar entry_flags;
+  gconstpointer data_ptr;
+  gsize data_len;
+
+  g_variant_get_child (pack_entry, 1, "y", &entry_flags);
+  g_variant_get_child (pack_entry, 3, "@ay", &pack_data);
+
+  data_ptr = g_variant_get_fixed_array (pack_data, &data_len, 1);
+  memory_input = g_memory_input_stream_new_from_data (data_ptr, data_len, NULL);
+  g_object_set_data_full ((GObject*)memory_input, "ostree-mem-gvariant",
+                          pack_data, (GDestroyNotify) g_variant_unref);
+
+  if (entry_flags & OSTREE_PACK_FILE_ENTRY_FLAG_GZIP)
+    {
+      GConverter *decompressor;
+
+      decompressor = (GConverter*)g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP);
+      ret_input = (GInputStream*)g_object_new (G_TYPE_CONVERTER_INPUT_STREAM,
+                                               "converter", decompressor,
+                                               "base-stream", memory_input,
+                                               "close-base-stream", TRUE,
+                                               NULL);
+      g_object_unref (decompressor);
+    }
+  else
+    {
+      ret_input = memory_input;
+      memory_input = NULL;
+    }
+
+  return ret_input;
 }

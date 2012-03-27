@@ -40,9 +40,6 @@
 #include "ostree-libarchive-input-stream.h"
 #endif
 
-#define ALIGN_VALUE(this, boundary) \
-  (( ((unsigned long)(this)) + (((unsigned long)(boundary)) -1)) & (~(((unsigned long)(boundary))-1)))
-
 enum {
   PROP_0,
 
@@ -2663,106 +2660,6 @@ bsearch_in_pack_index (GVariant   *index_contents,
 }
 
 static gboolean
-read_pack_entry (gboolean       trusted,
-                 guchar        *pack_data,
-                 guint64        pack_len,
-                 guint64        offset,
-                 GVariant     **out_entry,
-                 GCancellable  *cancellable,
-                 GError       **error)
-{
-  gboolean ret = FALSE;
-  GVariant *ret_entry = NULL;
-  guint64 entry_start;
-  guint64 entry_end;
-  guint32 entry_len;
-
-  if (G_UNLIKELY (!(offset < pack_len)))
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted pack index; out of range offset %" G_GUINT64_FORMAT,
-                   offset);
-      goto out;
-    }
-  if (G_UNLIKELY (!((offset & 0x3) == 0)))
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted pack index; unaligned offset %" G_GUINT64_FORMAT,
-                   offset);
-      goto out;
-    }
-
-  entry_start = ALIGN_VALUE (offset + 4, 8);
-  if (G_UNLIKELY (!(entry_start < pack_len)))
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted pack index; out of range data offset %" G_GUINT64_FORMAT,
-                   entry_start);
-      goto out;
-    }
-
-  g_assert ((((guint64)pack_data+offset) & 0x3) == 0);
-  entry_len = GUINT32_FROM_BE (*((guint32*)(pack_data+offset)));
-
-  entry_end = entry_start + entry_len;
-  if (G_UNLIKELY (!(entry_end < pack_len)))
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted pack index; out of range entry length %u",
-                   entry_len);
-      goto out;
-    }
-
-  ret_entry = g_variant_new_from_data (OSTREE_PACK_FILE_CONTENT_VARIANT_FORMAT,
-                                       pack_data+entry_start, entry_len,
-                                       trusted, NULL, NULL);
-  ret = TRUE;
-  ot_transfer_out_value (out_entry, &ret_entry);
- out:
-  ot_clear_gvariant (&ret_entry);
-  return ret;
-}
-
-static GInputStream *
-get_pack_entry_stream (GVariant        *pack_entry)
-{
-  GInputStream *memory_input;
-  GInputStream *ret_input = NULL;
-  GVariant *pack_data = NULL;
-  guchar entry_flags;
-  gconstpointer data_ptr;
-  gsize data_len;
-
-  g_variant_get_child (pack_entry, 1, "y", &entry_flags);
-  g_variant_get_child (pack_entry, 3, "@ay", &pack_data);
-
-  data_ptr = g_variant_get_fixed_array (pack_data, &data_len, 1);
-  memory_input = g_memory_input_stream_new_from_data (data_ptr, data_len, NULL);
-  g_object_set_data_full ((GObject*)memory_input, "ostree-mem-gvariant",
-                          pack_data, (GDestroyNotify) g_variant_unref);
-
-  if (entry_flags & OSTREE_PACK_FILE_ENTRY_FLAG_GZIP)
-    {
-      GConverter *decompressor;
-
-      decompressor = (GConverter*)g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP);
-      ret_input = (GInputStream*)g_object_new (G_TYPE_CONVERTER_INPUT_STREAM,
-                                               "converter", decompressor,
-                                               "base-stream", memory_input,
-                                               "close-base-stream", TRUE,
-                                               NULL);
-      g_object_unref (decompressor);
-    }
-  else
-    {
-      ret_input = memory_input;
-      memory_input = NULL;
-    }
-
-  return ret_input;
-}
-
-static gboolean
 get_pack_entry_as_variant (GVariant            *pack_entry,
                            const GVariantType  *type,
                            gboolean             trusted,
@@ -2775,7 +2672,7 @@ get_pack_entry_as_variant (GVariant            *pack_entry,
   GMemoryOutputStream *data_stream;
   GVariant *ret_variant;
 
-  stream = get_pack_entry_stream (pack_entry);
+  stream = ostree_read_pack_entry_as_stream (pack_entry);
   
   data_stream = (GMemoryOutputStream*)g_memory_output_stream_new (NULL, 0, g_realloc, g_free);
 
@@ -2859,10 +2756,11 @@ ostree_repo_load_file (OstreeRepo         *self,
                                               &content_pack_data, &content_pack_len,
                                               cancellable, error))
                 goto out;
-              if (!read_pack_entry (TRUE, content_pack_data, content_pack_len, content_pack_offset,
-                                    &packed_object, cancellable, error))
+              if (!ostree_read_pack_entry (content_pack_data, content_pack_len,
+                                           content_pack_offset, TRUE,
+                                           &packed_object, cancellable, error))
                 goto out;
-              ret_input = get_pack_entry_stream (packed_object);
+              ret_input = ostree_read_pack_entry_as_stream (packed_object);
             }
           else if (content_loose_path != NULL)
             {
@@ -3210,12 +3108,12 @@ ostree_repo_load_variant (OstreeRepo  *self,
                                       cancellable, error))
         goto out;
       
-      if (!read_pack_entry (TRUE, pack_data, pack_len, object_offset, &packed_object,
-                            cancellable, error))
+      if (!ostree_read_pack_entry (pack_data, pack_len, object_offset,
+                                   TRUE, &packed_object, cancellable, error))
         goto out;
 
-      if (!get_pack_entry_as_variant (packed_object, OSTREE_SERIALIZED_VARIANT_FORMAT, TRUE, &container_variant,
-                                      cancellable, error))
+      if (!get_pack_entry_as_variant (packed_object, OSTREE_SERIALIZED_VARIANT_FORMAT, TRUE,
+                                      &container_variant, cancellable, error))
         goto out;
       
       g_variant_get (container_variant, "(uv)",
