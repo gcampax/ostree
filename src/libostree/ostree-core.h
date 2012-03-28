@@ -99,11 +99,10 @@ typedef enum {
 
 /* Pack super index
  * s - OSTSUPERPACKINDEX
- * u - Version
  * a{sv} - Metadata
  * a(say) - (pack file checksum, bloom filter)
  */
-#define OSTREE_PACK_SUPER_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sua{sv}a(say))")
+#define OSTREE_PACK_SUPER_INDEX_VARIANT_FORMAT G_VARIANT_TYPE ("(sa{sv}a(say))")
 
 /* Pack index
  * s - OSTv0PACKINDEX
