@@ -21,7 +21,7 @@ set -e
 
 . libtest.sh
 
-echo '1..16'
+echo '1..19'
 
 setup_test_repository "archive"
 echo "ok setup"
@@ -89,3 +89,14 @@ echo "ok fsck"
 
 $OSTREE pack --analyze-only
 echo "ok pack analyze"
+
+$OSTREE unpack
+echo "ok unpack"
+
+cd ${test_tmpdir}
+$OSTREE fsck
+echo "ok fsck"
+
+cd ${test_tmpdir}
+$OSTREE checkout test2 checkout-test2-from-unpacked
+echo "ok checkout union 2"

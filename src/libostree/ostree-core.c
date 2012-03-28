@@ -1226,7 +1226,7 @@ ostree_read_pack_entry_raw (guchar        *pack_data,
   guint64 entry_end;
   guint32 entry_len;
 
-  if (G_UNLIKELY (!(offset < pack_len)))
+  if (G_UNLIKELY (!(offset <= pack_len)))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Corrupted pack index; out of range offset %" G_GUINT64_FORMAT,
@@ -1242,7 +1242,7 @@ ostree_read_pack_entry_raw (guchar        *pack_data,
     }
 
   entry_start = ALIGN_VALUE (offset + 4, 8);
-  if (G_UNLIKELY (!(entry_start < pack_len)))
+  if (G_UNLIKELY (!(entry_start <= pack_len)))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Corrupted pack index; out of range data offset %" G_GUINT64_FORMAT,
@@ -1254,7 +1254,7 @@ ostree_read_pack_entry_raw (guchar        *pack_data,
   entry_len = GUINT32_FROM_BE (*((guint32*)(pack_data+offset)));
 
   entry_end = entry_start + entry_len;
-  if (G_UNLIKELY (!(entry_end < pack_len)))
+  if (G_UNLIKELY (!(entry_end <= pack_len)))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Corrupted pack index; out of range entry length %u",

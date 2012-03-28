@@ -795,6 +795,7 @@ dup_file_info_owned_by_me (GFileInfo  *file_info)
 static gboolean
 stage_object_impl (OstreeRepo         *self,
                    OstreeObjectType    objtype,
+                   gboolean            store_if_packed,
                    GFileInfo          *file_info,
                    GVariant           *xattrs,
                    GInputStream       *input,
@@ -912,7 +913,7 @@ impl_stage_archive_file_object_from_raw (OstreeRepo         *self,
         g_checksum_update (ret_checksum, (guint8*)g_variant_get_data (xattrs), g_variant_get_size (xattrs));
     }
 
-  if (expected_checksum)
+  if (expected_checksum && ret_checksum)
     {
       if (strcmp (g_checksum_get_string (ret_checksum), expected_checksum) != 0)
         {
@@ -924,6 +925,8 @@ impl_stage_archive_file_object_from_raw (OstreeRepo         *self,
         }
       actual_checksum = expected_checksum;
     }
+  else if (expected_checksum)
+    actual_checksum = expected_checksum;
   else
     actual_checksum = g_checksum_get_string (ret_checksum);
 
@@ -951,6 +954,7 @@ impl_stage_archive_file_object_from_raw (OstreeRepo         *self,
 static gboolean
 stage_object_impl (OstreeRepo         *self,
                    OstreeObjectType    objtype,
+                   gboolean            store_if_packed,
                    GFileInfo          *file_info,
                    GVariant           *xattrs,
                    GInputStream       *input,
@@ -979,11 +983,22 @@ stage_object_impl (OstreeRepo         *self,
 
   if (expected_checksum)
     {
-      if (!ostree_repo_find_object (self, objtype, expected_checksum,
-                                    &stored_path, &pending_path,
-                                    &pack_checksum, &pack_offset,
-                                    cancellable, error))
-        goto out;
+      if (!store_if_packed)
+        {
+          if (!ostree_repo_find_object (self, objtype, expected_checksum,
+                                        &stored_path, &pending_path,
+                                        &pack_checksum, &pack_offset,
+                                        cancellable, error))
+            goto out;
+        }
+      else
+        {
+          if (!ostree_repo_find_object (self, objtype, expected_checksum,
+                                        &stored_path, &pending_path,
+                                        NULL, NULL,
+                                        cancellable, error))
+            goto out;
+        }
     }
 
   g_assert (objtype != OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
@@ -1195,7 +1210,7 @@ stage_gvariant_object (OstreeRepo         *self,
                                              g_variant_get_size (serialized),
                                              NULL);
   
-  if (!stage_object_impl (self, type,
+  if (!stage_object_impl (self, type, FALSE,
                           NULL, NULL, mem,
                           NULL, &ret_checksum, cancellable, error))
     goto out;
@@ -1258,13 +1273,14 @@ gboolean
 ostree_repo_stage_object_trusted (OstreeRepo   *self,
                                   OstreeObjectType objtype,
                                   const char   *checksum,
+                                  gboolean          store_if_packed,
                                   GFileInfo        *file_info,
                                   GVariant         *xattrs,
                                   GInputStream     *input,
                                   GCancellable *cancellable,
                                   GError      **error)
 {
-  return stage_object_impl (self, objtype,
+  return stage_object_impl (self, objtype, store_if_packed,
                             file_info, xattrs, input,
                             checksum, NULL, cancellable, error);
 }
@@ -1282,7 +1298,7 @@ ostree_repo_stage_object (OstreeRepo       *self,
   gboolean ret = FALSE;
   GChecksum *actual_checksum = NULL;
   
-  if (!stage_object_impl (self, objtype,
+  if (!stage_object_impl (self, objtype, FALSE,
                           file_info, xattrs, input,
                           expected_checksum, &actual_checksum, cancellable, error))
     goto out;
@@ -1768,7 +1784,7 @@ stage_directory_to_mtree_internal (OstreeRepo           *self,
                         goto out;
                     }
 
-                  if (!stage_object_impl (self, OSTREE_OBJECT_TYPE_RAW_FILE,
+                  if (!stage_object_impl (self, OSTREE_OBJECT_TYPE_RAW_FILE, FALSE,
                                           modified_info, xattrs, file_input, NULL,
                                           &child_file_checksum, cancellable, error))
                     goto out;
@@ -1970,7 +1986,7 @@ import_libarchive_entry_file (OstreeRepo           *self,
   if (g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
     archive_stream = ostree_libarchive_input_stream_new (a);
   
-  if (!stage_object_impl (self, OSTREE_OBJECT_TYPE_RAW_FILE,
+  if (!stage_object_impl (self, OSTREE_OBJECT_TYPE_RAW_FILE, FALSE,
                           file_info, NULL, archive_stream,
                           NULL, &ret_checksum,
                           cancellable, error))
@@ -3046,7 +3062,6 @@ ostree_repo_load_variant (OstreeRepo  *self,
   gboolean ret = FALSE;
   GFile *object_path = NULL;
   GVariant *packed_object = NULL;
-  GVariant *container_variant = NULL;
   GVariant *ret_variant = NULL;
   char *pack_checksum = NULL;
   guchar *pack_data;
@@ -3069,8 +3084,6 @@ ostree_repo_load_variant (OstreeRepo  *self,
     }
   else if (pack_checksum != NULL)
     {
-      guint32 actual_type;
-
       if (!ostree_repo_map_pack_file (self, pack_checksum, &pack_data, &pack_len,
                                       cancellable, error))
         goto out;
@@ -3080,7 +3093,7 @@ ostree_repo_load_variant (OstreeRepo  *self,
         goto out;
 
       if (!ostree_read_pack_entry_variant (packed_object, objtype, TRUE,
-                                           &container_variant, cancellable, error))
+                                           &ret_variant, cancellable, error))
         goto out;
     }
   else
@@ -3098,7 +3111,6 @@ ostree_repo_load_variant (OstreeRepo  *self,
   g_free (pack_checksum);
   ot_clear_gvariant (&ret_variant);
   ot_clear_gvariant (&packed_object);
-  ot_clear_gvariant (&container_variant);
   return ret;
 }
 /**

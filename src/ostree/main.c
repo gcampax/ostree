@@ -47,6 +47,7 @@ static OstreeBuiltin builtins[] = {
   { "rev-parse", ostree_builtin_rev_parse, 0 },
   { "remote", ostree_builtin_remote, 0 },
   { "show", ostree_builtin_show, 0 },
+  { "unpack", ostree_builtin_unpack, 0 },
   { NULL }
 };
 
