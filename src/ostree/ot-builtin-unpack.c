@@ -163,9 +163,15 @@ delete_one_packfile (OstreeRepo        *repo,
   data_path = ostree_repo_get_pack_data_path (repo, pack_checksum);
 
   if (!ot_gfile_unlink (index_path, cancellable, error))
-    goto out;
+    {
+      g_prefix_error (error, "Failed to delete pack index '%s': ", ot_gfile_get_path_cached (index_path));
+      goto out;
+    }
   if (!ot_gfile_unlink (data_path, cancellable, error))
-    goto out;
+    {
+      g_prefix_error (error, "Failed to delete pack data '%s': ", ot_gfile_get_path_cached (data_path));
+      goto out;
+    }
 
   ret = TRUE;
  out:
@@ -265,6 +271,9 @@ ostree_builtin_unpack (int argc, char **argv, GFile *repo_path, GError **error)
   if (!ostree_repo_commit_transaction (repo, cancellable, error))
     goto out;
 
+  if (g_hash_table_size (packfiles_to_delete) == 0)
+    g_print ("No pack files; nothing to do\n");
+
   g_hash_table_iter_init (&hash_iter, packfiles_to_delete);
   while (g_hash_table_iter_next (&hash_iter, &key, &value))
     {
@@ -272,6 +281,8 @@ ostree_builtin_unpack (int argc, char **argv, GFile *repo_path, GError **error)
 
       if (!delete_one_packfile (repo, pack_checksum, cancellable, error))
         goto out;
+      
+      g_print ("Deleted packfile '%s'\n", pack_checksum);
     }
 
   ret = TRUE;

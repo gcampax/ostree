@@ -219,6 +219,60 @@ compare_index_content (gconstpointer         ap,
 }
 
 static gboolean
+delete_loose_object (OtRepackData     *data,
+                     const char       *checksum,
+                     OstreeObjectType  objtype,
+                     GCancellable     *cancellable,
+                     GError          **error)
+{
+  gboolean ret = FALSE;
+  GFile *object_path = NULL;
+  GFile *content_object_path = NULL;
+  GVariant *archive_meta = NULL;
+  GFileInfo *file_info = NULL;
+  GVariant *xattrs = NULL;
+
+  object_path = ostree_repo_get_object_path (data->repo, checksum, objtype);
+  
+  /* This is gross - we need to specially clean up symbolic link object content */
+  if (objtype == OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META)
+    {
+      if (!ostree_map_metadata_file (object_path, objtype, &archive_meta, error))
+        goto out;
+      if (!ostree_parse_archived_file_meta (archive_meta, &file_info, &xattrs, error))
+        goto out;
+      
+      if (g_file_info_get_file_type (file_info) != G_FILE_TYPE_REGULAR)
+        {
+          content_object_path = ostree_repo_get_object_path (data->repo, checksum,
+                                                             OSTREE_OBJECT_TYPE_ARCHIVED_FILE_CONTENT);
+          if (!ot_gfile_unlink (content_object_path, cancellable, error))
+            {
+              g_prefix_error (error, "Failed to delete archived content '%s'",
+                              ot_gfile_get_path_cached (content_object_path));
+              goto out;
+            }
+        }
+    }
+
+  if (!ot_gfile_unlink (object_path, cancellable, error))
+    {
+      g_prefix_error (error, "Failed to delete archived file metadata '%s'",
+                      ot_gfile_get_path_cached (object_path));
+      goto out;
+    }
+
+  ret = TRUE;
+ out:
+  g_clear_object (&object_path);
+  g_clear_object (&content_object_path);
+  ot_clear_gvariant (&archive_meta);
+  g_clear_object (&file_info);
+  ot_clear_gvariant (&xattrs);
+  return ret;
+}
+
+static gboolean
 create_pack_file (OtRepackData        *data,
                   GPtrArray           *objects,
                   GCancellable        *cancellable,
@@ -442,6 +496,25 @@ create_pack_file (OtRepackData        *data,
 
   g_print ("Created pack file '%s' with %u objects\n", g_checksum_get_string (pack_checksum), objects->len);
 
+  if (!opt_keep_loose)
+    {
+      for (i = 0; i < objects->len; i++)
+        {
+          GVariant *object_data = objects->pdata[i];
+          const char *checksum;
+          guint32 objtype_u32;
+          OstreeObjectType objtype;
+          guint64 expected_objsize;
+
+          g_variant_get (object_data, "(&sut)", &checksum, &objtype_u32, &expected_objsize);
+          
+          objtype = (OstreeObjectType) objtype_u32;
+
+          if (!delete_loose_object (data, checksum, objtype, cancellable, error))
+            goto out;
+        }
+    }
+
   ret = TRUE;
  out:
   if (index_temppath)
@@ -548,13 +621,13 @@ cluster_objects_stupidly (OtRepackData      *data,
           if (current_offset < i)
             {
               current = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
-              for (j = current_offset; j < i; j++)
+              for (j = current_offset; j <= i; j++)
                 {
                   g_ptr_array_add (current, g_variant_ref (object_list->pdata[j]));
                 }
               g_ptr_array_add (ret_clusters, current);
               current_size = objsize;
-              current_offset = i;
+              current_offset = i+1;
             }
         }
       else if (objsize > data->pack_size)
@@ -770,9 +843,6 @@ ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
   guint i;
   GPtrArray *clusters = NULL;
   GHashTable *loose_objects = NULL;
-  GHashTableIter hash_iter;
-  gpointer key, value;
-  GFile *objpath = NULL;
 
   memset (&data, 0, sizeof (data));
 
@@ -832,35 +902,8 @@ ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
         }
     }
 
-  if (!opt_analyze_only && !opt_keep_loose)
-    {
-      g_hash_table_iter_init (&hash_iter, objects);
-      while (g_hash_table_iter_next (&hash_iter, &key, &value))
-        {
-          GVariant *serialized_key = key;
-          GVariant *objdata = value;
-          const char *checksum;
-          OstreeObjectType objtype;
-          gboolean is_loose;
-          GVariant *pack_array;
-
-          ostree_object_name_deserialize (serialized_key, &checksum, &objtype);
-
-          g_variant_get (objdata, "(b@as)", &is_loose, &pack_array);
-
-          if (is_loose && g_variant_n_children (pack_array) > 0)
-            {
-              g_clear_object (&objpath);
-              objpath = ostree_repo_get_object_path (data.repo, checksum, objtype);
-              if (!ot_gfile_unlink (objpath, cancellable, error))
-                goto out;
-            }
-        }
-    }
-
   ret = TRUE;
  out:
-  g_clear_object (&objpath);
   if (context)
     g_option_context_free (context);
   g_clear_object (&repo);
