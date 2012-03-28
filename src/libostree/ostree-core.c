@@ -1340,6 +1340,7 @@ ostree_read_pack_entry_variant (GVariant            *pack_entry,
                                                g_memory_output_stream_get_data (data_stream),
                                                g_memory_output_stream_get_data_size (data_stream),
                                                trusted, (GDestroyNotify) g_object_unref, data_stream);
+  g_variant_ref_sink (container_variant);
   data_stream = NULL; /* Transfer ownership */
 
   g_variant_get (container_variant, "(uv)",

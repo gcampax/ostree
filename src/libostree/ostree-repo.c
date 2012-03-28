@@ -2784,6 +2784,8 @@ ostree_repo_load_file (OstreeRepo         *self,
   g_clear_object (&content_loose_info);
   g_clear_object (&ret_file_info);
   ot_clear_gvariant (&ret_xattrs);
+  ot_clear_gvariant (&archive_meta);
+  ot_clear_gvariant (&packed_object);
   return ret;
 }
 
@@ -2923,6 +2925,8 @@ ostree_repo_list_pack_indexes (OstreeRepo              *self,
   ret = TRUE;
   ot_transfer_out_value (out_indexes, &ret_indexes);
  out:
+  if (index_files)
+    g_ptr_array_unref (index_files);
   if (ret_indexes)
     g_ptr_array_unref (ret_indexes);
   return ret;
