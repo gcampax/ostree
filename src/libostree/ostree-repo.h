@@ -230,6 +230,19 @@ gboolean      ostree_repo_stage_commit (OstreeRepo   *self,
                                         GCancellable *cancellable,
                                         GError      **error);
 
+gboolean
+ostree_repo_regenerate_pack_index (OstreeRepo       *self,
+                                   GCancellable     *cancellable,
+                                   GError          **error);
+
+
+gboolean     ostree_repo_add_pack_file (OstreeRepo       *self,
+                                        const char       *checksum,
+                                        GFile            *pack_index_path,
+                                        GFile            *pack_data_path,
+                                        GCancellable     *cancellable,
+                                        GError          **error);
+
 typedef enum {
   OSTREE_REPO_CHECKOUT_MODE_NONE = 0,
   OSTREE_REPO_CHECKOUT_MODE_USER = 1

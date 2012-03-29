@@ -85,7 +85,8 @@ ot_gfile_ensure_directory (GFile     *dir,
  *
  * Like g_file_delete(), except this function does not follow Unix
  * symbolic links, and will delete a symbolic link even if it's
- * pointing to a nonexistent file.
+ * pointing to a nonexistent file.  In other words, this function
+ * merely wraps the raw Unix function unlink().
  *
  * Returns: %TRUE on success, %FALSE on error
  */
@@ -103,6 +104,36 @@ ot_gfile_unlink (GFile          *path,
       return FALSE;
     }
   return TRUE;
+}
+
+/**
+ * ot_gfile_rename:
+ * @from: Current path
+ * @to: New path
+ * @cancellable: a #GCancellable
+ * @error: a #GError
+ *
+ * This function wraps the raw Unix function rename().
+ *
+ * Returns: %TRUE on success, %FALSE on error
+ */
+gboolean
+ot_gfile_rename (GFile          *from,
+                 GFile          *to,
+                 GCancellable   *cancellable,
+                 GError        **error)
+{
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return FALSE;
+
+  if (rename (ot_gfile_get_path_cached (from),
+              ot_gfile_get_path_cached (to)) < 0)
+    {
+      ot_util_set_error_from_errno (error, errno);
+      return FALSE;
+    }
+  return TRUE;
+
 }
 
 gboolean

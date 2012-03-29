@@ -35,6 +35,7 @@
 #define OT_GZIP_COMPRESSION_LEVEL (8)
 
 static gboolean opt_analyze_only;
+static gboolean opt_reindex_only;
 static gboolean opt_keep_loose;
 static char* opt_pack_size;
 static char* opt_int_compression;
@@ -51,6 +52,7 @@ static GOptionEntry options[] = {
   { "internal-compression", 0, 0, G_OPTION_ARG_STRING, &opt_int_compression, "Compress objects using COMPRESSION", "COMPRESSION" },
   { "external-compression", 0, 0, G_OPTION_ARG_STRING, &opt_ext_compression, "Compress entire packfiles using COMPRESSION", "COMPRESSION" },
   { "analyze-only", 0, 0, G_OPTION_ARG_NONE, &opt_analyze_only, "Just analyze current state", NULL },
+  { "reindex-only", 0, 0, G_OPTION_ARG_NONE, &opt_reindex_only, "Regenerate pack index", NULL },
   { "keep-loose", 0, 0, G_OPTION_ARG_NONE, &opt_keep_loose, "Don't delete loose objects", NULL },
   { NULL }
 };
@@ -437,25 +439,6 @@ create_pack_file (OtRepackData        *data,
   if (!g_output_stream_close (pack_out, cancellable, error))
     goto out;
 
-  pack_dir = g_file_resolve_relative_path (ostree_repo_get_path (data->repo),
-                                           "objects/pack");
-  if (!ot_gfile_ensure_directory (pack_dir, FALSE, error))
-    goto out;
-
-  pack_name = g_strconcat ("ostpack-", g_checksum_get_string (pack_checksum), ".data", NULL);
-  pack_file_path = g_file_get_child (pack_dir, pack_name);
-
-  if (rename (ot_gfile_get_path_cached (pack_temppath),
-              ot_gfile_get_path_cached (pack_file_path)) < 0)
-    {
-      ot_util_set_error_from_errno (error, errno);
-      g_prefix_error (error, "Failed to rename pack file '%s' to '%s': ",
-                      ot_gfile_get_path_cached (pack_temppath),
-                      ot_gfile_get_path_cached (pack_file_path));
-      goto out;
-    }
-  g_clear_object (&pack_temppath);
-
   g_variant_builder_init (&index_content_builder, G_VARIANT_TYPE ("a(uayt)"));
   g_ptr_array_sort (index_content_list, compare_index_content);
   for (i = 0; i < index_content_list->len; i++)
@@ -479,20 +462,16 @@ create_pack_file (OtRepackData        *data,
   if (!g_output_stream_close (index_out, cancellable, error))
     goto out;
 
-  g_free (pack_name);
-  pack_name = g_strconcat ("ostpack-", g_checksum_get_string (pack_checksum), ".index", NULL);
-  pack_index_path = g_file_get_child (pack_dir, pack_name);
+  if (!ostree_repo_add_pack_file (data->repo,
+                                  g_checksum_get_string (pack_checksum),
+                                  index_temppath,
+                                  pack_temppath,
+                                  cancellable,
+                                  error))
+    goto out;
 
-  if (rename (ot_gfile_get_path_cached (index_temppath),
-              ot_gfile_get_path_cached (pack_index_path)) < 0)
-    {
-      ot_util_set_error_from_errno (error, errno);
-      g_prefix_error (error, "Failed to rename pack file '%s' to '%s': ",
-                      ot_gfile_get_path_cached (index_temppath),
-                      ot_gfile_get_path_cached (pack_index_path));
-      goto out;
-    }
-  g_clear_object (&index_temppath);
+  if (!ostree_repo_regenerate_pack_index (data->repo, cancellable, error))
+    goto out;
 
   g_print ("Created pack file '%s' with %u objects\n", g_checksum_get_string (pack_checksum), objects->len);
 
@@ -831,6 +810,57 @@ do_stats_gather_loose (OtRepackData  *data,
   return ret;
 }
 
+static gboolean
+do_incremental_pack (OtRepackData          *data,
+                     GCancellable          *cancellable,
+                     GError               **error)
+{
+  gboolean ret = FALSE;
+  GHashTable *objects = NULL;
+  guint i;
+  GPtrArray *clusters = NULL;
+  GHashTable *loose_objects = NULL;
+
+  if (!ostree_repo_list_objects (data->repo, OSTREE_REPO_LIST_OBJECTS_ALL, &objects,
+                                 cancellable, error))
+    goto out;
+
+  if (!do_stats_gather_loose (data, objects, &loose_objects, cancellable, error))
+    goto out;
+
+  g_print ("\n");
+  g_print ("Using pack size: %" G_GUINT64_FORMAT "\n", data->pack_size);
+
+  if (!cluster_objects_stupidly (data, loose_objects, &clusters, cancellable, error))
+    goto out;
+  
+  if (clusters->len > 0)
+    g_print ("Going to create %u packfiles\n", clusters->len);
+  else
+    g_print ("Nothing to do\n");
+  
+  for (i = 0; i < clusters->len; i++)
+    {
+      GPtrArray *cluster = clusters->pdata[i];
+      
+      if (!opt_analyze_only)
+        {
+          if (!create_pack_file (data, cluster, cancellable, error))
+            goto out;
+        }
+    }
+
+  ret = TRUE;
+ out:
+  if (clusters)
+    g_ptr_array_unref (clusters);
+  if (loose_objects)
+    g_hash_table_unref (loose_objects);
+  if (objects)
+    g_hash_table_unref (objects);
+  return ret;
+}
+
 gboolean
 ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
 {
@@ -838,11 +868,7 @@ ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
   GOptionContext *context;
   OtRepackData data;
   OstreeRepo *repo = NULL;
-  GHashTable *objects = NULL;
   GCancellable *cancellable = NULL;
-  guint i;
-  GPtrArray *clusters = NULL;
-  GHashTable *loose_objects = NULL;
 
   memset (&data, 0, sizeof (data));
 
@@ -874,32 +900,15 @@ ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
   if (!parse_compression_string (opt_ext_compression, &data.ext_compression, error))
     goto out;
 
-  if (!ostree_repo_list_objects (repo, OSTREE_REPO_LIST_OBJECTS_ALL, &objects, cancellable, error))
-    goto out;
-
-  if (!do_stats_gather_loose (&data, objects, &loose_objects, cancellable, error))
-    goto out;
-
-  g_print ("\n");
-  g_print ("Using pack size: %" G_GUINT64_FORMAT "\n", data.pack_size);
-
-  if (!cluster_objects_stupidly (&data, loose_objects, &clusters, cancellable, error))
-    goto out;
-  
-  if (clusters->len > 0)
-    g_print ("Going to create %u packfiles\n", clusters->len);
-  else
-    g_print ("Nothing to do\n");
-  
-  for (i = 0; i < clusters->len; i++)
+  if (opt_reindex_only)
     {
-      GPtrArray *cluster = clusters->pdata[i];
-      
-      if (!opt_analyze_only)
-        {
-          if (!create_pack_file (&data, cluster, cancellable, error))
-            goto out;
-        }
+      if (!ostree_repo_regenerate_pack_index (repo, cancellable, error))
+        goto out;
+    }
+  else
+    {
+      if (!do_incremental_pack (&data, cancellable, error))
+        goto out;
     }
 
   ret = TRUE;
@@ -907,11 +916,5 @@ ostree_builtin_pack (int argc, char **argv, GFile *repo_path, GError **error)
   if (context)
     g_option_context_free (context);
   g_clear_object (&repo);
-  if (clusters)
-    g_ptr_array_unref (clusters);
-  if (loose_objects)
-    g_hash_table_unref (loose_objects);
-  if (objects)
-    g_hash_table_unref (objects);
   return ret;
 }

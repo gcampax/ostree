@@ -1532,6 +1532,299 @@ ostree_repo_stage_commit (OstreeRepo *self,
   return ret;
 }
 
+static gboolean
+list_files_in_dir_matching (GFile                  *dir,
+                            const char             *prefix,
+                            const char             *suffix,
+                            GPtrArray             **out_files,
+                            GCancellable           *cancellable,
+                            GError                **error)
+{
+  gboolean ret = FALSE;
+  GError *temp_error = NULL;
+  GFileEnumerator *enumerator = NULL;
+  GFileInfo *file_info = NULL;
+  GPtrArray *ret_files = NULL;
+
+  g_return_val_if_fail (prefix != NULL || suffix != NULL, FALSE);
+
+  ret_files = g_ptr_array_new_with_free_func ((GDestroyNotify)g_object_unref);
+
+  enumerator = g_file_enumerate_children (dir, OSTREE_GIO_FAST_QUERYINFO, 
+                                          G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+                                          cancellable, 
+                                          error);
+  if (!enumerator)
+    goto out;
+  
+  while ((file_info = g_file_enumerator_next_file (enumerator, cancellable, &temp_error)) != NULL)
+    {
+      const char *name;
+      guint32 type;
+
+      name = g_file_info_get_attribute_byte_string (file_info, "standard::name"); 
+      type = g_file_info_get_attribute_uint32 (file_info, "standard::type");
+
+      if (type != G_FILE_TYPE_REGULAR)
+        goto loop_next;
+
+      if (prefix)
+        {
+          if (!g_str_has_prefix (name, prefix))
+            goto loop_next;
+        }
+      if (suffix)
+        {
+          if (!g_str_has_suffix (name, suffix))
+            goto loop_next;
+        }
+
+      g_ptr_array_add (ret_files, g_file_get_child (dir, name));
+      
+    loop_next:
+      g_clear_object (&file_info);
+    }
+  if (temp_error != NULL)
+    {
+      g_propagate_error (error, temp_error);
+      goto out;
+    }
+  if (!g_file_enumerator_close (enumerator, cancellable, error))
+    goto out;
+
+  ret = TRUE;
+  ot_transfer_out_value (out_files, &ret_files);
+ out:
+  if (ret_files)
+    g_ptr_array_unref (ret_files);
+  g_clear_object (&file_info);
+  g_clear_object (&enumerator);
+  return ret;
+}
+
+static char *
+get_checksum_from_pack_name (const char *name)
+{
+  const char *dash;
+  const char *dot;
+
+  dash = strchr (name, '-');
+  g_assert (dash);
+  dot = strrchr (name, '.');
+  g_assert (dot);
+
+  g_assert_cmpint (dot - (dash + 1), ==, 64);
+  
+  return g_strndup (dash + 1, 64);
+}
+
+static gboolean
+list_pack_indexes_from_dir (OstreeRepo              *self,
+                            GPtrArray              **out_indexes,
+                            GCancellable            *cancellable,
+                            GError                 **error)
+{
+  gboolean ret = FALSE;
+  GPtrArray *index_files = NULL;
+  GPtrArray *ret_indexes = NULL;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  guint i;
+
+  if (!list_files_in_dir_matching (priv->pack_dir,
+                                   "ostpack-", ".index",
+                                   &index_files, 
+                                   cancellable, error))
+    goto out;
+
+  ret_indexes = g_ptr_array_new_with_free_func ((GDestroyNotify)g_free);
+  for (i = 0; i < index_files->len; i++)
+    {
+      GFile *index_path = index_files->pdata[i];
+      const char *basename = ot_gfile_get_basename_cached (index_path);
+      g_ptr_array_add (ret_indexes, get_checksum_from_pack_name (basename));
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_indexes, &ret_indexes);
+ out:
+  if (index_files)
+    g_ptr_array_unref (index_files);
+  if (ret_indexes)
+    g_ptr_array_unref (ret_indexes);
+  return ret;
+}
+
+gboolean
+ostree_repo_list_pack_indexes (OstreeRepo              *self,
+                               GPtrArray              **out_indexes,
+                               GCancellable            *cancellable,
+                               GError                 **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GFile *superindex_path = NULL;
+  GPtrArray *ret_indexes = NULL;
+  GVariant *superindex_variant = NULL;
+  GVariantIter *variant_iter = NULL;
+  const char *magic;
+  GVariant *checksum;
+  GVariant *bloom;
+
+  superindex_path = g_file_get_child (priv->pack_dir, "index");
+
+  ret_indexes = g_ptr_array_new_with_free_func ((GDestroyNotify)g_free);
+
+  if (g_file_query_exists (superindex_path, cancellable))
+    {
+      if (!ot_util_variant_map (superindex_path, OSTREE_PACK_SUPER_INDEX_VARIANT_FORMAT,
+                                &superindex_variant, error))
+        goto out;
+
+      g_variant_get (superindex_variant, "(&s@a{sv}a(ayay))",
+                     &magic, NULL, &variant_iter);
+
+      if (strcmp (magic, "OSTv0SUPERPACKINDEX") != 0)
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Invalid header in super pack index");
+          goto out;
+        }
+
+      while (g_variant_iter_loop (variant_iter, "(@ay@ay)",
+                                  &checksum, &bloom))
+        g_ptr_array_add (ret_indexes, ostree_checksum_from_bytes (checksum));
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_indexes, &ret_indexes);
+ out:
+  ot_clear_gvariant (&superindex_variant);
+  g_clear_object (&superindex_path);
+  if (variant_iter)
+    g_variant_iter_free (variant_iter);
+  if (ret_indexes)
+    g_ptr_array_unref (ret_indexes);
+  return ret;
+}
+
+static gboolean
+create_index_bloom (OstreeRepo          *self,
+                    const char          *pack_checksum,
+                    GVariant           **out_bloom,
+                    GCancellable        *cancellable,
+                    GError             **error)
+{
+  gboolean ret = FALSE;
+  GVariant *ret_bloom;
+
+  /* TODO - compute bloom filter */
+
+  ret_bloom = g_variant_new_fixed_array (G_VARIANT_TYPE ("y"), NULL, 0, 1);
+  g_variant_ref_sink (ret_bloom);
+
+  ret = TRUE;
+  ot_transfer_out_value (out_bloom, &ret_bloom);
+  /* out: */
+  ot_clear_gvariant (&ret_bloom);
+  return ret;
+}
+
+gboolean
+ostree_repo_regenerate_pack_index (OstreeRepo       *self,
+                                   GCancellable     *cancellable,
+                                   GError          **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  GFile *index_path = NULL;
+  GPtrArray *pack_indexes = NULL;
+  GVariantBuilder *index_content_builder = NULL;
+  GVariant *index_variant = NULL;
+  guint i;
+
+  if (!list_pack_indexes_from_dir (self, &pack_indexes, cancellable, error))
+    goto out;
+
+  index_path = g_file_get_child (priv->pack_dir, "index");
+
+  index_content_builder = g_variant_builder_new (G_VARIANT_TYPE ("a(ayay)"));
+  
+  for (i = 0; i < pack_indexes->len; i++)
+    {
+      const char *pack_checksum = pack_indexes->pdata[i];
+      GVariant *bloom;
+
+      if (!create_index_bloom (self, pack_checksum, &bloom, cancellable, error))
+        goto out;
+
+      g_variant_builder_add (index_content_builder,
+                             "(@ay@ay)",
+                             ostree_checksum_to_bytes (pack_checksum),
+                             bloom);
+      g_variant_unref (bloom);
+    }
+
+  index_variant = g_variant_new ("(s@a{sv}@a(ayay))",
+                                 "OSTv0SUPERPACKINDEX",
+                                 g_variant_new_array (G_VARIANT_TYPE ("{sv}"),
+                                                      NULL, 0),
+                                 g_variant_builder_end (index_content_builder));
+  g_variant_ref_sink (index_variant);
+
+  if (!ot_util_variant_save (index_path, index_variant,
+                             cancellable, error))
+    goto out;
+
+  ret = TRUE;
+ out:
+  ot_clear_gvariant (&index_variant);
+  if (index_content_builder)
+    g_variant_builder_unref (index_content_builder);
+  g_clear_object (&index_path);
+  if (pack_indexes)
+    g_ptr_array_unref (pack_indexes);
+  return ret;
+}
+
+gboolean
+ostree_repo_add_pack_file (OstreeRepo       *self,
+                           const char       *pack_checksum,
+                           GFile            *index_path,
+                           GFile            *data_path,
+                           GCancellable     *cancellable,
+                           GError          **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoPrivate *priv = GET_PRIVATE (self);
+  char *dest_name = NULL;
+  GFile *pack_index_path = NULL;
+  GFile *pack_data_path = NULL;
+
+  if (!ot_gfile_ensure_directory (priv->pack_dir, FALSE, error))
+    goto out;
+
+  g_free (dest_name);
+  dest_name = g_strconcat ("ostpack-", pack_checksum, ".data", NULL);
+  pack_data_path = g_file_get_child (priv->pack_dir, dest_name);
+
+  if (!ot_gfile_rename (data_path, pack_data_path, cancellable, error))
+    goto out;
+
+  g_free (dest_name);
+  dest_name = g_strconcat ("ostpack-", pack_checksum, ".index", NULL);
+  pack_index_path = g_file_get_child (priv->pack_dir, dest_name);
+
+  if (!ot_gfile_rename (index_path, pack_index_path, cancellable, error))
+    goto out;
+
+  ret = TRUE;
+ out:
+  g_clear_object (&pack_index_path);
+  g_clear_object (&pack_data_path);
+  g_free (dest_name);
+  return ret;
+}
+
 static GVariant *
 create_tree_variant_from_hashes (GHashTable            *file_checksums,
                                  GHashTable            *dir_contents_checksums,
@@ -2351,76 +2644,6 @@ list_loose_object_dir (OstreeRepo             *self,
 }
 
 static gboolean
-list_files_in_dir_matching (GFile                  *dir,
-                            const char             *prefix,
-                            const char             *suffix,
-                            GPtrArray             **out_files,
-                            GCancellable           *cancellable,
-                            GError                **error)
-{
-  gboolean ret = FALSE;
-  GError *temp_error = NULL;
-  GFileEnumerator *enumerator = NULL;
-  GFileInfo *file_info = NULL;
-  GPtrArray *ret_files = NULL;
-
-  g_return_val_if_fail (prefix != NULL || suffix != NULL, FALSE);
-
-  ret_files = g_ptr_array_new_with_free_func ((GDestroyNotify)g_object_unref);
-
-  enumerator = g_file_enumerate_children (dir, OSTREE_GIO_FAST_QUERYINFO, 
-                                          G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-                                          cancellable, 
-                                          error);
-  if (!enumerator)
-    goto out;
-  
-  while ((file_info = g_file_enumerator_next_file (enumerator, cancellable, &temp_error)) != NULL)
-    {
-      const char *name;
-      guint32 type;
-
-      name = g_file_info_get_attribute_byte_string (file_info, "standard::name"); 
-      type = g_file_info_get_attribute_uint32 (file_info, "standard::type");
-
-      if (type != G_FILE_TYPE_REGULAR)
-        goto loop_next;
-
-      if (prefix)
-        {
-          if (!g_str_has_prefix (name, prefix))
-            goto loop_next;
-        }
-      if (suffix)
-        {
-          if (!g_str_has_suffix (name, suffix))
-            goto loop_next;
-        }
-
-      g_ptr_array_add (ret_files, g_file_get_child (dir, name));
-      
-    loop_next:
-      g_clear_object (&file_info);
-    }
-  if (temp_error != NULL)
-    {
-      g_propagate_error (error, temp_error);
-      goto out;
-    }
-  if (!g_file_enumerator_close (enumerator, cancellable, error))
-    goto out;
-
-  ret = TRUE;
-  ot_transfer_out_value (out_files, &ret_files);
- out:
-  if (ret_files)
-    g_ptr_array_unref (ret_files);
-  g_clear_object (&file_info);
-  g_clear_object (&enumerator);
-  return ret;
-}
-
-static gboolean
 list_loose_objects (OstreeRepo                     *self,
                     GHashTable                     *inout_objects,
                     GCancellable                   *cancellable,
@@ -2471,22 +2694,6 @@ list_loose_objects (OstreeRepo                     *self,
   g_clear_object (&file_info);
   g_clear_object (&enumerator);
   return ret;
-}
-
-static char *
-get_checksum_from_pack_name (const char *name)
-{
-  const char *dash;
-  const char *dot;
-
-  dash = strchr (name, '-');
-  g_assert (dash);
-  dot = strrchr (name, '.');
-  g_assert (dot);
-
-  g_assert_cmpint (dot - (dash + 1), ==, 64);
-  
-  return g_strndup (dash + 1, 64);
 }
 
 GFile *
@@ -2893,42 +3100,6 @@ list_packed_objects (OstreeRepo                     *self,
  out:
   if (index_checksums)
     g_ptr_array_unref (index_checksums);
-  return ret;
-}
-
-gboolean
-ostree_repo_list_pack_indexes (OstreeRepo              *self,
-                               GPtrArray              **out_indexes,
-                               GCancellable            *cancellable,
-                               GError                 **error)
-{
-  gboolean ret = FALSE;
-  GPtrArray *index_files = NULL;
-  GPtrArray *ret_indexes = NULL;
-  OstreeRepoPrivate *priv = GET_PRIVATE (self);
-  guint i;
-
-  if (!list_files_in_dir_matching (priv->pack_dir,
-                                   "ostpack-", ".index",
-                                   &index_files, 
-                                   cancellable, error))
-    goto out;
-
-  ret_indexes = g_ptr_array_new_with_free_func ((GDestroyNotify)g_free);
-  for (i = 0; i < index_files->len; i++)
-    {
-      GFile *index_path = index_files->pdata[i];
-      const char *basename = ot_gfile_get_basename_cached (index_path);
-      g_ptr_array_add (ret_indexes, get_checksum_from_pack_name (basename));
-    }
-
-  ret = TRUE;
-  ot_transfer_out_value (out_indexes, &ret_indexes);
- out:
-  if (index_files)
-    g_ptr_array_unref (index_files);
-  if (ret_indexes)
-    g_ptr_array_unref (ret_indexes);
   return ret;
 }
 
