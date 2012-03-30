@@ -183,6 +183,11 @@ GVariant *ostree_get_xattrs_for_file (GFile       *f,
 
 GVariant *ostree_wrap_metadata_variant (OstreeObjectType type, GVariant *metadata);
 
+gboolean ostree_unwrap_metadata (GVariant              *container,
+                                 OstreeObjectType       expected_type,
+                                 GVariant             **out_variant,
+                                 GError               **error);
+
 gboolean ostree_set_xattrs (GFile *f, GVariant *xattrs,
                             GCancellable *cancellable, GError **error);
 

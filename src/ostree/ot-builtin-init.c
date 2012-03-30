@@ -45,7 +45,9 @@ ostree_builtin_init (int argc, char **argv, GFile *repo_path, GError **error)
   gboolean ret = FALSE;
   GFile *child = NULL;
   GFile *grandchild = NULL;
+  GCancellable *cancellable = NULL;
   GString *config_data = NULL;
+  OstreeRepo *repo = NULL;
 
   context = g_option_context_new ("- Initialize a new empty repository");
   g_option_context_add_main_entries (context, options, NULL);
@@ -104,6 +106,13 @@ ostree_builtin_init (int argc, char **argv, GFile *repo_path, GError **error)
   if (!g_file_make_directory (child, NULL, error))
     goto out;
 
+  repo = ostree_repo_new (repo_path);
+  if (!ostree_repo_check (repo, error))
+    goto out;
+
+  if (!ostree_repo_regenerate_pack_index (repo, cancellable, error))
+    goto out;
+
   ret = TRUE;
  out:
   if (context)
@@ -112,5 +121,6 @@ ostree_builtin_init (int argc, char **argv, GFile *repo_path, GError **error)
     g_string_free (config_data, TRUE);
   g_clear_object (&child);
   g_clear_object (&grandchild);
+  g_clear_object (&repo);
   return ret;
 }

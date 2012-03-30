@@ -490,6 +490,34 @@ ostree_set_xattrs (GFile  *f,
 }
 
 gboolean
+ostree_unwrap_metadata (GVariant              *container,
+                        OstreeObjectType       expected_type,
+                        GVariant             **out_variant,
+                        GError               **error)
+{
+  gboolean ret = FALSE;
+  GVariant *ret_variant = NULL;
+  guint32 actual_type;
+
+  g_variant_get (container, "(uv)",
+                 &actual_type, &ret_variant);
+  actual_type = GUINT32_FROM_BE (actual_type);
+  if (actual_type != expected_type)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Corrupted metadata object; found type %u, expected %u",
+                   actual_type, (guint32)expected_type);
+      goto out;
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_variant, &ret_variant);
+ out:
+  ot_clear_gvariant (&ret_variant);
+  return ret;
+}
+
+gboolean
 ostree_map_metadata_file (GFile                       *file,
                           OstreeObjectType             expected_type,
                           GVariant                   **out_variant,
@@ -498,22 +526,16 @@ ostree_map_metadata_file (GFile                       *file,
   gboolean ret = FALSE;
   GVariant *ret_variant = NULL;
   GVariant *container = NULL;
-  guint32 actual_type;
 
   if (!ot_util_variant_map (file, OSTREE_SERIALIZED_VARIANT_FORMAT,
                             &container, error))
     goto out;
 
-  g_variant_get (container, "(uv)",
-                 &actual_type, &ret_variant);
-  ot_util_variant_take_ref (ret_variant);
-  actual_type = GUINT32_FROM_BE (actual_type);
-  if (actual_type != expected_type)
+  if (!ostree_unwrap_metadata (container, expected_type, &ret_variant,
+                               error))
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Corrupted metadata object '%s'; found type %u, expected %u",
-                   ot_gfile_get_path_cached (file), 
-                   actual_type, (guint32)expected_type);
+      g_prefix_error (error, "While parsing '%s': ",
+                      ot_gfile_get_path_cached (file));
       goto out;
     }
 
@@ -1535,7 +1557,7 @@ ostree_validate_structureof_pack_superindex (GVariant      *superindex,
 
   g_variant_get_child (superindex, 0, "&s", &header);
 
-  if (strcmp (header, "OSTv0PACKSUPERINDEX") != 0)
+  if (strcmp (header, "OSTv0SUPERPACKINDEX") != 0)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                            "Invalid pack superindex; doesn't match header");

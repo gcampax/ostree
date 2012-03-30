@@ -83,9 +83,12 @@ suburi_new (SoupURI   *base,
   arg_array = g_ptr_array_new ();
   g_ptr_array_add (arg_array, (char*)soup_uri_get_path (base));
   g_ptr_array_add (arg_array, (char*)first);
+
+  va_start (args, first);
   
   while ((arg = va_arg (args, const char *)) != NULL)
     g_ptr_array_add (arg_array, (char*)arg);
+  g_ptr_array_add (arg_array, NULL);
 
   subpath = g_build_filenamev ((char**)arg_array->pdata);
   g_ptr_array_unref (arg_array);
@@ -93,6 +96,8 @@ suburi_new (SoupURI   *base,
   ret = soup_uri_copy (base);
   soup_uri_set_path (ret, subpath);
   g_free (subpath);
+  
+  va_end (args);
   
   return ret;
 }
@@ -568,7 +573,7 @@ static gboolean
 fetch_and_store_object (OtPullData       *pull_data,
                         const char       *checksum,
                         OstreeObjectType objtype,
-                        gboolean         *out_is_pending,
+                        gboolean         *out_was_stored,
                         GCancellable     *cancellable,
                         GError          **error)
 {
@@ -579,16 +584,16 @@ fetch_and_store_object (OtPullData       *pull_data,
   GFile *pending_path = NULL;
   char *pack_checksum = NULL;
   gboolean is_stored;
-  gboolean ret_is_pending;
+  gboolean is_pending;
 
   g_assert (objtype != OSTREE_OBJECT_TYPE_RAW_FILE);
 
   if (!fetch_object_if_not_stored (pull_data, checksum, objtype,
-                                   &is_stored, &ret_is_pending, &input,
+                                   &is_stored, &is_pending, &input,
                                    cancellable, error))
     goto out;
 
-  if (ret_is_pending || input)
+  if (is_pending || input)
     {
       if (!ostree_repo_stage_object (pull_data->repo, objtype, checksum, NULL, NULL,
                                      input, cancellable, error))
@@ -598,8 +603,8 @@ fetch_and_store_object (OtPullData       *pull_data,
     }
 
   ret = TRUE;
-  if (out_is_pending)
-    *out_is_pending = ret_is_pending;
+  if (out_was_stored)
+    *out_was_stored = is_stored;
  out:
   g_clear_object (&file_info);
   g_clear_object (&input);
@@ -613,17 +618,17 @@ static gboolean
 fetch_and_store_metadata (OtPullData          *pull_data,
                           const char          *checksum,
                           OstreeObjectType     objtype,
-                          gboolean            *out_is_pending,
+                          gboolean            *out_was_stored,
                           GVariant           **out_variant,
                           GCancellable        *cancellable,
                           GError             **error)
 {
   gboolean ret = FALSE;
-  gboolean ret_is_pending;
+  gboolean ret_was_stored;
   GVariant *ret_variant = NULL;
 
   if (!fetch_and_store_object (pull_data, checksum, objtype,
-                               &ret_is_pending, cancellable, error))
+                               &ret_was_stored, cancellable, error))
     goto out;
 
   if (!ostree_repo_load_variant (pull_data->repo, objtype, checksum,
@@ -632,8 +637,8 @@ fetch_and_store_metadata (OtPullData          *pull_data,
 
   ret = TRUE;
   ot_transfer_out_value (out_variant, &ret_variant);
-  if (out_is_pending)
-    *out_is_pending = ret_is_pending;
+  if (out_was_stored)
+    *out_was_stored = ret_was_stored;
  out:
   ot_clear_gvariant (&ret_variant);
   return ret;
@@ -650,6 +655,7 @@ fetch_and_store_file (OtPullData          *pull_data,
   GFile *stored_path = NULL;
   GFile *pending_path = NULL;
   char *pack_checksum = NULL;
+  GVariant *archive_metadata_container = NULL;
   GVariant *archive_metadata = NULL;
   GFileInfo *archive_file_info = NULL;
   GVariant *archive_xattrs = NULL;
@@ -694,7 +700,11 @@ fetch_and_store_file (OtPullData          *pull_data,
       if (input != NULL)
         {
           if (!ot_util_variant_from_stream (input, OSTREE_SERIALIZED_VARIANT_FORMAT,
-                                            FALSE, &archive_metadata, cancellable, error))
+                                            FALSE, &archive_metadata_container, cancellable, error))
+            goto out;
+
+          if (!ostree_unwrap_metadata (archive_metadata_container, OSTREE_OBJECT_TYPE_ARCHIVED_FILE_META,
+                                       &archive_metadata, error))
             goto out;
   
           if (!ostree_parse_archived_file_meta (archive_metadata, &archive_file_info,
@@ -724,6 +734,8 @@ fetch_and_store_file (OtPullData          *pull_data,
   g_clear_object (&stored_path);
   g_clear_object (&pending_path);
   g_clear_object (&input);
+  ot_clear_gvariant (&archive_metadata_container);
+  ot_clear_gvariant (&archive_metadata);
   ot_clear_gvariant (&archive_xattrs);
   g_clear_object (&archive_file_info);
   return ret;
@@ -739,17 +751,17 @@ fetch_and_store_tree_recurse (OtPullData   *pull_data,
   GVariant *tree = NULL;
   GVariant *files_variant = NULL;
   GVariant *dirs_variant = NULL;
-  gboolean is_pending;
+  gboolean was_stored;
   int i, n;
   GFile *stored_path = NULL;
   GFile *pending_path = NULL;
   char *pack_checksum = NULL;
 
   if (!fetch_and_store_metadata (pull_data, rev, OSTREE_OBJECT_TYPE_DIR_TREE,
-                                 &is_pending, &tree, cancellable, error))
+                                 &was_stored, &tree, cancellable, error))
     goto out;
 
-  if (!is_pending)
+  if (was_stored)
     log_verbose ("Already have tree %s", rev);
   else
     {
@@ -821,13 +833,13 @@ fetch_and_store_commit_recurse (OtPullData   *pull_data,
   GVariant *commit = NULL;
   const char *tree_contents_checksum;
   const char *tree_meta_checksum;
-  gboolean is_pending;
+  gboolean was_stored;
 
   if (!fetch_and_store_metadata (pull_data, rev, OSTREE_OBJECT_TYPE_COMMIT,
-                                 &is_pending, &commit, cancellable, error))
+                                 &was_stored, &commit, cancellable, error))
     goto out;
 
-  if (!is_pending)
+  if (was_stored)
     log_verbose ("Already have commit %s", rev);
   else
     {

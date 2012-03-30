@@ -164,7 +164,7 @@ ostree_repo_constructor (GType                  gtype,
   
   priv->objects_dir = g_file_get_child (priv->repodir, "objects");
   priv->pack_dir = g_file_get_child (priv->objects_dir, "pack");
-  priv->remote_cache_dir = g_file_get_child (priv->objects_dir, "remote-cache");
+  priv->remote_cache_dir = g_file_get_child (priv->repodir, "remote-cache");
   priv->config_file = g_file_get_child (priv->repodir, "config");
 
   return object;
@@ -1904,16 +1904,17 @@ ensure_remote_cache_dir (OstreeRepo       *self,
 {
   gboolean ret = FALSE;
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
-  GFile *path = NULL;
+  GFile *ret_cache_dir = NULL;
 
-  path = g_file_get_child (priv->remote_cache_dir, remote_name);
+  ret_cache_dir = g_file_get_child (priv->remote_cache_dir, remote_name);
   
-  if (!ot_gfile_ensure_directory (path, FALSE, error))
+  if (!ot_gfile_ensure_directory (ret_cache_dir, FALSE, error))
     goto out;
 
   ret = TRUE;
+  ot_transfer_out_value (out_cache_dir, &ret_cache_dir);
  out:
-  g_clear_object (&path);
+  g_clear_object (&ret_cache_dir);
   return ret;
 }
 
@@ -3531,6 +3532,7 @@ ostree_repo_load_variant (OstreeRepo  *self,
 {
   gboolean ret = FALSE;
   GFile *object_path = NULL;
+  GFile *pending_path = NULL;
   GVariant *packed_object = NULL;
   GVariant *ret_variant = NULL;
   char *pack_checksum = NULL;
@@ -3541,15 +3543,16 @@ ostree_repo_load_variant (OstreeRepo  *self,
 
   g_return_val_if_fail (OSTREE_OBJECT_TYPE_IS_META (objtype), FALSE);
 
-  if (!ostree_repo_find_object (self, objtype, sha256, &object_path, NULL,
+  if (!ostree_repo_find_object (self, objtype, sha256, &object_path, &pending_path,
                                 &pack_checksum, &object_offset,
                                 cancellable, error))
     goto out;
 
   /* Prefer loose metadata for now */
-  if (object_path != NULL)
+  if (object_path != NULL || pending_path != NULL)
     {
-      if (!ostree_map_metadata_file (object_path, objtype, &ret_variant, error))
+      if (!ostree_map_metadata_file (object_path ? object_path : pending_path,
+                                     objtype, &ret_variant, error))
         goto out;
     }
   else if (pack_checksum != NULL)
@@ -3583,6 +3586,7 @@ ostree_repo_load_variant (OstreeRepo  *self,
   ot_clear_gvariant (&packed_object);
   return ret;
 }
+
 /**
  * ostree_repo_list_objects:
  * @self:
