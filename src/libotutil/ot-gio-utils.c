@@ -77,6 +77,32 @@ ot_gfile_ensure_directory (GFile     *dir,
   return ret;
 }
 
+GFile *
+ot_gfile_get_child_strconcat (GFile *parent,
+                              const char *first,
+                              ...) 
+{
+  va_list args;
+  GFile *ret;
+  GString *buf;
+  const char *arg;
+
+  g_return_val_if_fail (first != NULL, NULL);
+
+  va_start (args, first);
+  
+  buf = g_string_new (first);
+  
+  while ((arg = va_arg (args, const char *)) != NULL)
+    g_string_append (buf, arg);
+
+  ret = g_file_get_child (parent, buf->str);
+  
+  g_string_free (buf, TRUE);
+
+  return ret;
+}
+
 /**
  * ot_gfile_unlink:
  * @path: Path to file

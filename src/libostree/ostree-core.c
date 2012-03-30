@@ -652,6 +652,9 @@ ostree_checksum_to_bytes (const char *sha256)
       big = g_ascii_xdigit_value (sha256[j]);
       little = g_ascii_xdigit_value (sha256[j+1]);
 
+      g_assert (big != -1);
+      g_assert (little != -1);
+
       result[i] = (big << 4) | little;
     }
   
@@ -1311,7 +1314,6 @@ ostree_read_pack_entry_as_stream (GVariant *pack_entry)
   return ret_input;
 }
 
-
 gboolean
 ostree_read_pack_entry_variant (GVariant            *pack_entry,
                                 OstreeObjectType     expected_objtype,
@@ -1322,26 +1324,17 @@ ostree_read_pack_entry_variant (GVariant            *pack_entry,
 {
   gboolean ret = FALSE;
   GInputStream *stream = NULL;
-  GMemoryOutputStream *data_stream = NULL;
   GVariant *container_variant = NULL;
   GVariant *ret_variant = NULL;
   guint32 actual_type;
 
   stream = ostree_read_pack_entry_as_stream (pack_entry);
   
-  data_stream = (GMemoryOutputStream*)g_memory_output_stream_new (NULL, 0, g_realloc, g_free);
-
-  if (!g_output_stream_splice ((GOutputStream*)data_stream, stream,
-                               G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET,
-                               cancellable, error))
+  if (!ot_util_variant_from_stream (stream, OSTREE_SERIALIZED_VARIANT_FORMAT,
+                                    trusted, &container_variant, cancellable, error))
     goto out;
 
-  container_variant = g_variant_new_from_data (OSTREE_SERIALIZED_VARIANT_FORMAT,
-                                               g_memory_output_stream_get_data (data_stream),
-                                               g_memory_output_stream_get_data_size (data_stream),
-                                               trusted, (GDestroyNotify) g_object_unref, data_stream);
   g_variant_ref_sink (container_variant);
-  data_stream = NULL; /* Transfer ownership */
 
   g_variant_get (container_variant, "(uv)",
                  &actual_type, &ret_variant);
@@ -1359,10 +1352,211 @@ ostree_read_pack_entry_variant (GVariant            *pack_entry,
   ot_transfer_out_value (out_variant, &ret_variant);
  out:
   g_clear_object (&stream);
-  g_clear_object (&data_stream);
   ot_clear_gvariant (&ret_variant);
   ot_clear_gvariant (&container_variant);
   return ret;
 }
 
+gboolean
+ostree_pack_index_search (GVariant   *index,
+                          GVariant   *csum_bytes,
+                          OstreeObjectType objtype,
+                          guint64    *out_offset)
+{
+  gboolean ret = FALSE;
+  GVariant *index_contents;
+  gsize imax, imin;
+  gsize n;
+  guint32 target_objtype;
 
+  index_contents = g_variant_get_child_value (index, 2);
+
+  target_objtype = (guint32) objtype;
+
+  n = g_variant_n_children (index_contents);
+
+  if (n == 0)
+    goto out;
+
+  imax = n - 1;
+  imin = 0;
+  while (imax >= imin)
+    {
+      GVariant *cur_csum_bytes;
+      guint32 cur_objtype;
+      guint64 cur_offset;
+      gsize imid;
+      int c;
+
+      imid = (imin + imax) / 2;
+
+      g_variant_get_child (index_contents, imid, "(u@ayt)", &cur_objtype,
+                           &cur_csum_bytes, &cur_offset);      
+      cur_objtype = GUINT32_FROM_BE (cur_objtype);
+      cur_offset = GUINT64_FROM_BE (cur_offset);
+
+      c = ostree_cmp_checksum_bytes (cur_csum_bytes, csum_bytes);
+      if (c == 0)
+        {
+          if (cur_objtype < target_objtype)
+            c = -1;
+          else if (cur_objtype > target_objtype)
+            c = 1;
+        }
+      g_variant_unref (cur_csum_bytes);
+
+      if (c < 0)
+        imin = imid + 1;
+      else if (c > 0)
+        {
+          if (imid == 0)
+            goto out;
+          imax = imid - 1;
+        }
+      else
+        {
+          *out_offset = cur_offset;
+          break;
+        } 
+    }
+
+  ret = TRUE;
+ out:
+  ot_clear_gvariant (&index_contents);
+  return ret;
+}
+
+gboolean
+ostree_validate_structureof_objtype (guint32    objtype,
+                                     GError   **error)
+{
+  objtype = GUINT32_FROM_BE (objtype);
+  if (objtype < OSTREE_OBJECT_TYPE_RAW_FILE 
+      || objtype > OSTREE_OBJECT_TYPE_COMMIT)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid object type '%u'", objtype);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+gboolean
+ostree_validate_structureof_checksum (GVariant  *checksum,
+                                      GError   **error)
+{
+  gsize n_children = g_variant_n_children (checksum);
+  if (n_children != 32)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid checksum of length %" G_GUINT64_FORMAT
+                   " expected 32", (guint64) n_children);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
+validate_variant (GVariant           *variant,
+                  const GVariantType *variant_type,
+                  GError            **error)
+{
+  if (!g_variant_is_normal_form (variant))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Not normal form");
+      return FALSE;
+    }
+  if (!g_variant_is_of_type (variant, variant_type))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Doesn't match variant type '%s'",
+                   (char*)variant_type);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+gboolean
+ostree_validate_structureof_pack_index (GVariant      *index,
+                                        GError       **error)
+{
+  gboolean ret = FALSE;
+  const char *header;
+  GVariantIter *content_iter = NULL;
+  guint32 objtype;
+  GVariant *csum_bytes = NULL;
+  guint64 offset;
+
+  if (!validate_variant (index, OSTREE_PACK_INDEX_VARIANT_FORMAT, error))
+    goto out;
+
+  g_variant_get_child (index, 0, "&s", &header);
+
+  if (strcmp (header, "OSTv0PACKINDEX") != 0)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid pack index; doesn't match header");
+      goto out;
+    }
+
+  g_variant_get_child (index, 2, "a(uayt)", &content_iter);
+
+  while (g_variant_iter_loop (content_iter, "(u@ayt)",
+                              &objtype, &csum_bytes, &offset))
+    {
+      if (!ostree_validate_structureof_objtype (objtype, error))
+        goto out;
+      if (!ostree_validate_structureof_checksum (csum_bytes, error))
+        goto out;
+    }
+  csum_bytes = NULL;
+
+  ret = TRUE;
+ out:
+  if (content_iter)
+    g_variant_iter_free (content_iter);
+  ot_clear_gvariant (&csum_bytes);
+  return ret;
+}
+
+gboolean
+ostree_validate_structureof_pack_superindex (GVariant      *superindex,
+                                             GError       **error)
+{
+  gboolean ret = FALSE;
+  const char *header;
+  GVariant *csum_bytes = NULL;
+  GVariant *bloom = NULL;
+  GVariantIter *content_iter = NULL;
+
+  if (!validate_variant (superindex, OSTREE_PACK_SUPER_INDEX_VARIANT_FORMAT, error))
+    goto out;
+
+  g_variant_get_child (superindex, 0, "&s", &header);
+
+  if (strcmp (header, "OSTv0PACKSUPERINDEX") != 0)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid pack superindex; doesn't match header");
+      goto out;
+    }
+
+  g_variant_get_child (superindex, 2, "a(ayay)", &content_iter);
+
+  while (g_variant_iter_loop (content_iter, "(@ay@ay)",
+                              &csum_bytes, &bloom))
+    {
+      if (!ostree_validate_structureof_checksum (csum_bytes, error))
+        goto out;
+    }
+  csum_bytes = NULL;
+
+  ret = TRUE;
+ out:
+  if (content_iter)
+    g_variant_iter_free (content_iter);
+  ot_clear_gvariant (&csum_bytes);
+  ot_clear_gvariant (&bloom);
+  return ret;
+}

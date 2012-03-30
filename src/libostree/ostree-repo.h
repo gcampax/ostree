@@ -230,11 +230,9 @@ gboolean      ostree_repo_stage_commit (OstreeRepo   *self,
                                         GCancellable *cancellable,
                                         GError      **error);
 
-gboolean
-ostree_repo_regenerate_pack_index (OstreeRepo       *self,
-                                   GCancellable     *cancellable,
-                                   GError          **error);
-
+gboolean ostree_repo_regenerate_pack_index (OstreeRepo       *self,
+                                            GCancellable     *cancellable,
+                                            GError          **error);
 
 gboolean     ostree_repo_add_pack_file (OstreeRepo       *self,
                                         const char       *checksum,
@@ -242,6 +240,42 @@ gboolean     ostree_repo_add_pack_file (OstreeRepo       *self,
                                         GFile            *pack_data_path,
                                         GCancellable     *cancellable,
                                         GError          **error);
+
+gboolean     ostree_repo_resync_cached_remote_pack_indexes (OstreeRepo       *self,
+                                                            const char       *remote_name,
+                                                            GFile            *superindex_path,
+                                                            GPtrArray       **out_cached_indexes,
+                                                            GPtrArray       **out_uncached_indexes,
+                                                            GCancellable     *cancellable,
+                                                            GError          **error);
+
+gboolean     ostree_repo_map_cached_remote_pack_index (OstreeRepo       *self,
+                                                       const char       *remote_name,
+                                                       const char       *pack_checksum,
+                                                       GVariant        **out_variant,
+                                                       GCancellable     *cancellable,
+                                                       GError          **error);
+
+gboolean     ostree_repo_add_cached_remote_pack_index (OstreeRepo       *self,
+                                                       const char       *remote_name,
+                                                       const char       *pack_checksum,
+                                                       GFile            *cached_path,
+                                                       GCancellable     *cancellable,
+                                                       GError          **error);
+
+gboolean     ostree_repo_get_cached_remote_pack_data (OstreeRepo       *self,
+                                                      const char       *remote_name,
+                                                      const char       *pack_checksum,
+                                                      GFile           **out_cached_path,
+                                                      GCancellable     *cancellable,
+                                                      GError          **error);
+
+gboolean     ostree_repo_take_cached_remote_pack_data (OstreeRepo       *self,
+                                                       const char       *remote_name,
+                                                       const char       *pack_checksum,
+                                                       GFile            *cached_path,
+                                                       GCancellable     *cancellable,
+                                                       GError          **error);
 
 typedef enum {
   OSTREE_REPO_CHECKOUT_MODE_NONE = 0,

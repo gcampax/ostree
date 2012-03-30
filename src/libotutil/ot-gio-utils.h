@@ -36,6 +36,8 @@ G_BEGIN_DECLS
 
 GFileType ot_gfile_type_for_mode (guint32 mode);
 
+GFile *ot_gfile_get_child_strconcat (GFile *parent, const char *first, ...) G_GNUC_NULL_TERMINATED;
+
 GFile *ot_gfile_new_for_path (const char *path);
 
 const char *ot_gfile_get_path_cached (GFile *file);

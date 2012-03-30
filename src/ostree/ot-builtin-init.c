@@ -99,6 +99,11 @@ ostree_builtin_init (int argc, char **argv, GFile *repo_path, GError **error)
   if (!g_file_make_directory (child, NULL, error))
     goto out;
 
+  g_clear_object (&child);
+  child = g_file_get_child (repo_path, "remote-cache");
+  if (!g_file_make_directory (child, NULL, error))
+    goto out;
+
   ret = TRUE;
  out:
   if (context)

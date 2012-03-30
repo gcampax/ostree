@@ -98,7 +98,7 @@ typedef enum {
 #define OSTREE_ARCHIVED_FILE_VARIANT_FORMAT G_VARIANT_TYPE ("(uuuuusa(ayay))")
 
 /* Pack super index
- * s - OSTSUPERPACKINDEX
+ * s - OSTv0SUPERPACKINDEX
  * a{sv} - Metadata
  * a(say) - (pack file checksum, bloom filter)
  */
@@ -159,6 +159,7 @@ GVariant *ostree_object_name_serialize_v2 (const char *checksum,
 void ostree_object_name_deserialize_v2_hex (GVariant         *variant,
                                             char            **out_checksum,
                                             OstreeObjectType *out_objtype);
+
 
 void ostree_object_name_deserialize_v2_bytes (GVariant         *variant,
                                               const guchar    **out_checksum,
@@ -280,5 +281,24 @@ gboolean ostree_read_pack_entry_variant (GVariant         *pack_entry,
                                          GVariant        **out_variant,
                                          GCancellable     *cancellable,
                                          GError          **error);
+
+gboolean ostree_pack_index_search (GVariant            *index,
+                                   GVariant           *csum_bytes,
+                                   OstreeObjectType    objtype,
+                                   guint64            *out_offset);
+
+/** VALIDATION **/
+
+gboolean ostree_validate_structureof_objtype (guint32    objtype,
+                                              GError   **error);
+
+gboolean ostree_validate_structureof_checksum (GVariant  *checksum,
+                                               GError   **error);
+
+gboolean ostree_validate_structureof_pack_index (GVariant      *index,
+                                                 GError       **error);
+
+gboolean ostree_validate_structureof_pack_superindex (GVariant      *superindex,
+                                                      GError       **error);
 
 #endif /* _OSTREE_REPO */

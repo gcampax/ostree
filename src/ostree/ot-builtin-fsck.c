@@ -204,6 +204,8 @@ fsck_pack_files (OtFsckData  *data,
 {
   gboolean ret = FALSE;
   GPtrArray *pack_indexes = NULL;
+  GVariant *index_variant = NULL;
+  GFile *pack_index_path = NULL;
   GFile *pack_data_path = NULL;
   GInputStream *input = NULL;
   GChecksum *pack_content_checksum = NULL;
@@ -215,6 +217,22 @@ fsck_pack_files (OtFsckData  *data,
   for (i = 0; i < pack_indexes->len; i++)
     {
       const char *checksum = pack_indexes->pdata[i];
+
+      g_clear_object (&pack_index_path);
+      pack_index_path = ostree_repo_get_pack_index_path (data->repo, checksum);
+
+      ot_clear_gvariant (&index_variant);
+      if (!ot_util_variant_map (pack_index_path,
+                                OSTREE_PACK_INDEX_VARIANT_FORMAT,
+                                &index_variant, error))
+        goto out;
+      
+      if (!ostree_validate_structureof_pack_index (index_variant, error))
+        {
+          g_prefix_error (error, "Corrupted pack index '%s': ",
+                          ot_gfile_get_path_cached (pack_index_path));
+          goto out;
+        }
 
       g_clear_object (&pack_data_path);
       pack_data_path = ostree_repo_get_pack_data_path (data->repo, checksum);
