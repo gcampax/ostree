@@ -478,6 +478,8 @@ find_object (OtPullData        *pull_data,
     *out_is_stored = ret_is_stored;
   if (out_is_pending)
     *out_is_pending = ret_is_pending;
+  if (out_offset)
+    *out_offset = offset;
   ot_transfer_out_value (out_remote_pack_checksum, &ret_remote_pack_checksum);
  out:
   g_free (local_pack_checksum);
@@ -538,6 +540,9 @@ fetch_object_if_not_stored (OtPullData           *pull_data,
         goto out;
 
       ret_input = ostree_read_pack_entry_as_stream (pack_entry);
+      g_object_set_data_full ((GObject*)ret_input, "ostree-pull-pack-map",
+                              pack_map, (GDestroyNotify) g_mapped_file_unref);
+      pack_map = NULL; /* Transfer ownership */
     }
   else if (!(ret_is_stored || ret_is_pending))
     {

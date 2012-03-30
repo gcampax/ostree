@@ -2109,7 +2109,7 @@ ostree_repo_add_cached_remote_pack_index (OstreeRepo       *self,
   if (!ensure_remote_cache_dir (self, remote_name, &cachedir, cancellable, error))
     goto out;
   
-  cached_path = get_pack_index_name_from_checksum (cachedir, pack_checksum);
+  target_path = get_pack_index_name_from_checksum (cachedir, pack_checksum);
   if (!ot_util_variant_save (target_path, output_index_variant, cancellable, error))
     goto out;
 
