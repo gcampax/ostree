@@ -44,9 +44,11 @@ MILESTONE 2
 -----------
 * Store checksums as ay
 * Drop version/metadata from tree/dirmeta objects
+* Split pack files into metadata/data
 * Restructure repository so that links can be generated as a cache;
   i.e. objects/raw, pack files are now the canonical
 * For files, checksum combination of metadata variant + raw data 
+  - i.e. there is only OSTREE_OBJECT_TYPE_FILE (again)
 
 MILESTONE 3
 -----------
@@ -54,7 +56,6 @@ MILESTONE 3
 * Drop archive/raw distinction - archive repositories always generate
   packfiles per commit
 * Include git packv4 ideas:
-  - split packfile implementations between metadata and data
   - metadata packfiles have string dictionary (tree filenames and checksums)
   - data packfiles match up similar objects
 * Rolling checksums for partitioning large files?  Kernel debuginfo
