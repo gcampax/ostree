@@ -29,6 +29,7 @@ mkdir repo
 ostree --repo=repo init
 ostree --repo=repo remote add origin $(cat httpd-address)/ostree/gnomerepo
 ostree-pull --repo=repo origin main
+ostree --repo=repo fsck
 echo "ok pull"
 
 cd ${test_tmpdir}
@@ -45,6 +46,7 @@ mkdir repo
 ostree --repo=repo init
 ostree --repo=repo remote add origin $(cat httpd-address)/ostree/gnomerepo
 ostree-pull --repo=repo origin main
+ostree --repo=repo fsck
 echo "ok pull packed"
 
 cd ${test_tmpdir}

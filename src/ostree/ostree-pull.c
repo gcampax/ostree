@@ -478,9 +478,9 @@ find_object (OtPullData        *pull_data,
     *out_is_stored = ret_is_stored;
   if (out_is_pending)
     *out_is_pending = ret_is_pending;
+  ot_transfer_out_value (out_remote_pack_checksum, &ret_remote_pack_checksum);
   if (out_offset)
     *out_offset = offset;
-  ot_transfer_out_value (out_remote_pack_checksum, &ret_remote_pack_checksum);
  out:
   g_free (local_pack_checksum);
   g_free (ret_remote_pack_checksum);
@@ -513,7 +513,7 @@ fetch_object_if_not_stored (OtPullData           *pull_data,
   GFile *pack_path = NULL;
   GMappedFile *pack_map = NULL;
   char *remote_pack_checksum = NULL;
-  guint64 pack_offset;
+  guint64 pack_offset = 0;
   GVariant *pack_entry = NULL;
 
   if (!find_object (pull_data, checksum, objtype, &ret_is_stored,

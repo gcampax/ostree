@@ -1415,7 +1415,6 @@ ostree_pack_index_search (GVariant   *index,
       g_variant_get_child (index_contents, imid, "(u@ayt)", &cur_objtype,
                            &cur_csum_bytes, &cur_offset);      
       cur_objtype = GUINT32_FROM_BE (cur_objtype);
-      cur_offset = GUINT64_FROM_BE (cur_offset);
 
       c = ostree_cmp_checksum_bytes (cur_csum_bytes, csum_bytes);
       if (c == 0)
@@ -1437,12 +1436,13 @@ ostree_pack_index_search (GVariant   *index,
         }
       else
         {
-          *out_offset = cur_offset;
-          break;
+          if (out_offset)
+            *out_offset = GUINT64_FROM_BE (cur_offset);
+          ret = TRUE;
+          goto out;
         } 
     }
 
-  ret = TRUE;
  out:
   ot_clear_gvariant (&index_contents);
   return ret;

@@ -39,8 +39,8 @@ static GOptionEntry options[] = {
 
 typedef struct {
   OstreeRepo *repo;
-  guint n_objects;
-  gboolean had_error;
+  guint n_loose_objects;
+  guint n_pack_files;
 } OtFsckData;
 
 static gboolean
@@ -124,29 +124,6 @@ checksum_archived_file (OtFsckData   *data,
   return ret;
 }
 
-static void
-encountered_fsck_error (OtFsckData  *data,
-                        const char  *fmt,
-                        ...) G_GNUC_PRINTF (2, 3);
-
-static void
-encountered_fsck_error (OtFsckData  *data,
-                        const char  *fmt,
-                        ...)
-{
-  va_list args;
-  char *msg;
-
-  va_start (args, fmt);
-
-  g_vasprintf (&msg, fmt, args);
-  g_printerr ("ERROR: %s\n", msg);
-  data->had_error = TRUE;
-
-  va_end (args);
-}
-                        
-
 static gboolean
 fsck_loose_object (OtFsckData    *data,
                    const char    *exp_checksum,
@@ -182,14 +159,14 @@ fsck_loose_object (OtFsckData    *data,
 
   if (real_checksum && strcmp (exp_checksum, g_checksum_get_string (real_checksum)) != 0)
     {
-
-      encountered_fsck_error (data, "corrupted object '%s'; actual checksum: %s",
-                              ot_gfile_get_path_cached (objf), g_checksum_get_string (real_checksum));
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "corrupted loose object '%s'; actual checksum: %s",
+                   ot_gfile_get_path_cached (objf), g_checksum_get_string (real_checksum));
       if (delete)
         (void) unlink (ot_gfile_get_path_cached (objf));
     }
 
-  data->n_objects++;
+  data->n_loose_objects++;
 
   ret = TRUE;
  out:
@@ -207,9 +184,14 @@ fsck_pack_files (OtFsckData  *data,
   GVariant *index_variant = NULL;
   GFile *pack_index_path = NULL;
   GFile *pack_data_path = NULL;
+  GFileInfo *pack_info = NULL;
   GInputStream *input = NULL;
   GChecksum *pack_content_checksum = NULL;
+  GVariantIter *index_content_iter = NULL;
   guint i;
+  guint32 objtype;
+  guint64 offset;
+  guint64 pack_size;
 
   if (!ostree_repo_list_pack_indexes (data->repo, &pack_indexes, cancellable, error))
     goto out;
@@ -228,11 +210,7 @@ fsck_pack_files (OtFsckData  *data,
         goto out;
       
       if (!ostree_validate_structureof_pack_index (index_variant, error))
-        {
-          g_prefix_error (error, "Corrupted pack index '%s': ",
-                          ot_gfile_get_path_cached (pack_index_path));
-          goto out;
-        }
+        goto out;
 
       g_clear_object (&pack_data_path);
       pack_data_path = ostree_repo_get_pack_data_path (data->repo, checksum);
@@ -241,6 +219,13 @@ fsck_pack_files (OtFsckData  *data,
       input = (GInputStream*)g_file_read (pack_data_path, cancellable, error);
       if (!input)
         goto out;
+
+      g_clear_object (&pack_info);
+      pack_info = g_file_input_stream_query_info ((GFileInputStream*)input, OSTREE_GIO_FAST_QUERYINFO,
+                                                  cancellable, error);
+      if (!pack_info)
+        goto out;
+      pack_size = g_file_info_get_attribute_uint64 (pack_info, "standard::size");
      
       if (pack_content_checksum)
         g_checksum_free (pack_content_checksum);
@@ -249,17 +234,40 @@ fsck_pack_files (OtFsckData  *data,
 
       if (strcmp (g_checksum_get_string (pack_content_checksum), checksum) != 0)
         {
-          encountered_fsck_error (data, "corrupted pack '%s', expected checksum %s",
-                                  checksum, g_checksum_get_string (pack_content_checksum));
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "corrupted pack '%s', expected checksum %s",
+                       checksum, g_checksum_get_string (pack_content_checksum));
+          goto out;
         }
+
+      g_variant_get_child (index_variant, 2, "a(uayt)", &index_content_iter);
+
+      while (g_variant_iter_loop (index_content_iter, "(u@ayt)",
+                                  &objtype, NULL, &offset))
+        {
+          offset = GUINT64_FROM_BE (offset);
+          if (offset > pack_size)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "corrupted pack '%s', offset %" G_GUINT64_FORMAT " larger than file size %" G_GUINT64_FORMAT,
+                           checksum,
+                           offset, pack_size);
+              goto out;
+            }
+        }
+
+      data->n_pack_files++;
     }
 
   ret = TRUE;
  out:
+  if (index_content_iter)
+    g_variant_iter_free (index_content_iter);
   if (pack_content_checksum)
     g_checksum_free (pack_content_checksum);
   if (pack_indexes)
     g_ptr_array_unref (pack_indexes);
+  g_clear_object (&pack_info);
   g_clear_object (&pack_data_path);
   g_clear_object (&input);
   return ret;
@@ -288,9 +296,8 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
   if (!ostree_repo_check (repo, error))
     goto out;
 
+  memset (&data, 0, sizeof (data));
   data.repo = repo;
-  data.n_objects = 0;
-  data.had_error = FALSE;
 
   if (!ostree_repo_list_objects (repo, OSTREE_REPO_LIST_OBJECTS_ALL,
                                  &objects, cancellable, error))
@@ -320,14 +327,9 @@ ostree_builtin_fsck (int argc, char **argv, GFile *repo_path, GError **error)
   if (!fsck_pack_files (&data, cancellable, error))
     goto out;
 
-  if (data.had_error)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Encountered filesystem consistency errors");
-      goto out;
-    }
   if (!quiet)
-    g_print ("Total Objects: %u\n", data.n_objects);
+    g_print ("Loose Objects: %u\n", data.n_loose_objects);
+    g_print ("Pack files: %u\n", data.n_pack_files);
 
   ret = TRUE;
  out:
