@@ -74,8 +74,11 @@ struct _OstreeRepoPrivate {
   GFile *remote_cache_dir;
   GFile *config_file;
 
+  GMutex cache_lock;
   GPtrArray *cached_meta_indexes;
   GPtrArray *cached_content_indexes;
+  GHashTable *cached_pack_index_mappings;
+  GHashTable *cached_pack_data_mappings;
 
   gboolean inited;
   gboolean in_transaction;
@@ -84,9 +87,6 @@ struct _OstreeRepoPrivate {
   OstreeRepoMode mode;
 
   OstreeRepo *parent_repo;
-
-  GHashTable *pack_index_mappings;
-  GHashTable *pack_data_mappings;
 };
 
 static void
@@ -106,12 +106,13 @@ ostree_repo_finalize (GObject *object)
   g_clear_object (&priv->pack_dir);
   g_clear_object (&priv->remote_cache_dir);
   g_clear_object (&priv->config_file);
-  g_hash_table_destroy (priv->pack_index_mappings);
-  g_hash_table_destroy (priv->pack_data_mappings);
   if (priv->config)
     g_key_file_free (priv->config);
   ot_clear_ptrarray (&priv->cached_meta_indexes);
   ot_clear_ptrarray (&priv->cached_content_indexes);
+  g_hash_table_destroy (priv->cached_pack_index_mappings);
+  g_hash_table_destroy (priv->cached_pack_data_mappings);
+  g_mutex_clear (&priv->cache_lock);
 
   G_OBJECT_CLASS (ostree_repo_parent_class)->finalize (object);
 }
@@ -212,12 +213,13 @@ ostree_repo_init (OstreeRepo *self)
 {
   OstreeRepoPrivate *priv = GET_PRIVATE (self);
   
-  priv->pack_index_mappings = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                                     g_free,
-                                                     (GDestroyNotify)g_variant_unref);
-  priv->pack_data_mappings = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                                    g_free,
-                                                    (GDestroyNotify)g_mapped_file_unref);
+  g_mutex_init (&priv->cache_lock);
+  priv->cached_pack_index_mappings = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                            g_free,
+                                                            (GDestroyNotify)g_variant_unref);
+  priv->cached_pack_data_mappings = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                           g_free,
+                                                           (GDestroyNotify)g_mapped_file_unref);
 }
 
 OstreeRepo*
@@ -1667,6 +1669,7 @@ ostree_repo_list_pack_indexes (OstreeRepo              *self,
   ot_lptrarray GPtrArray *ret_meta_indexes = NULL;
   ot_lptrarray GPtrArray *ret_data_indexes = NULL;
 
+  g_mutex_lock (&priv->cache_lock);
   if (priv->cached_meta_indexes)
     {
       ret_meta_indexes = g_ptr_array_ref (priv->cached_meta_indexes);
@@ -1697,6 +1700,7 @@ ostree_repo_list_pack_indexes (OstreeRepo              *self,
   ot_transfer_out_value (out_meta_indexes, &ret_meta_indexes);
   ot_transfer_out_value (out_data_indexes, &ret_data_indexes);
  out:
+  g_mutex_unlock (&priv->cache_lock);
   return ret;
 }
 
@@ -3138,7 +3142,9 @@ ostree_repo_load_pack_index (OstreeRepo    *self,
   ot_lvariant GVariant *ret_variant = NULL;
   ot_lobj GFile *path = NULL;
   
-  ret_variant = g_hash_table_lookup (priv->pack_index_mappings, pack_checksum);
+  g_mutex_lock (&priv->cache_lock);
+
+  ret_variant = g_hash_table_lookup (priv->cached_pack_index_mappings, pack_checksum);
   if (ret_variant)
     {
       g_variant_ref (ret_variant);
@@ -3152,13 +3158,14 @@ ostree_repo_load_pack_index (OstreeRepo    *self,
                                                  &ret_variant,
                                                  cancellable, error))
         goto out;
-      g_hash_table_insert (priv->pack_index_mappings, g_strdup (pack_checksum),
+      g_hash_table_insert (priv->cached_pack_index_mappings, g_strdup (pack_checksum),
                            g_variant_ref (ret_variant));
     }
 
   ret = TRUE;
   ot_transfer_out_value (out_variant, &ret_variant);
  out:
+  g_mutex_unlock (&priv->cache_lock);
   return ret;
 }
 
@@ -3185,7 +3192,9 @@ ostree_repo_map_pack_file (OstreeRepo    *self,
   GMappedFile *map = NULL;
   ot_lobj GFile *path = NULL;
 
-  map = g_hash_table_lookup (priv->pack_data_mappings, pack_checksum);
+  g_mutex_lock (&priv->cache_lock);
+
+  map = g_hash_table_lookup (priv->cached_pack_data_mappings, pack_checksum);
   if (map == NULL)
     {
       path = get_pack_data_path (priv->pack_dir, is_meta, pack_checksum);
@@ -3194,7 +3203,7 @@ ostree_repo_map_pack_file (OstreeRepo    *self,
       if (!map)
         goto out;
 
-      g_hash_table_insert (priv->pack_data_mappings, g_strdup (pack_checksum), map);
+      g_hash_table_insert (priv->cached_pack_data_mappings, g_strdup (pack_checksum), map);
       ret_data = g_mapped_file_get_contents (map);
     }
 
@@ -3207,6 +3216,7 @@ ostree_repo_map_pack_file (OstreeRepo    *self,
   if (out_len)
     *out_len = ret_len;
  out:
+  g_mutex_unlock (&priv->cache_lock);
   return ret;
 }
 
