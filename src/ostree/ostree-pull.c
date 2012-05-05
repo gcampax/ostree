@@ -1160,7 +1160,7 @@ ostree_builtin_pull (int argc, char **argv, GFile *repo_path, GError **error)
       GError *temp_error = NULL;
       gboolean fetch_all_refs;
 
-      configured_branches = g_key_file_get_string_list (config, key, "branches", NULL, &temp_error);
+      configured_branches = g_key_file_get_string_list (config, tmpstr, "branches", NULL, &temp_error);
       if (configured_branches == NULL && temp_error != NULL)
         {
           if (g_error_matches (temp_error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_KEY_NOT_FOUND))
