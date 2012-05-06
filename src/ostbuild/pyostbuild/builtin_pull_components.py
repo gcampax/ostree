@@ -39,14 +39,14 @@ class OstbuildPullComponents(builtins.Builtin):
         builtins.Builtin.__init__(self)
 
     def execute(self, argv):
+        self._init_repo()
         parser = argparse.ArgumentParser(description=self.short_description)
         parser.add_argument('targets', nargs='*')
 
         args = parser.parse_args(argv)
 
-        self.parse_active_branch()
-
         if len(args.targets) == 0:
+            self.parse_active_branch()
             targets = [self.active_branch]
         else:
             targets = args.targets
@@ -58,8 +58,8 @@ class OstbuildPullComponents(builtins.Builtin):
             tree_contents_list.append(tree_contents)
         revisions = set()
         for tree_contents in tree_contents_list:
-            for content_item in tree_contents['contents']:
-                revisions.add(content_item['ostree-revision'])
+            for component in tree_contents['components']:
+                revisions.add('components/' + component)
         args = ['ostree-pull', '--repo=' + self.repo]
         # FIXME FIXME - don't hardcode origin here
         args.append('gnome')
