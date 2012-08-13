@@ -1,0 +1,11 @@
+#!/bin/sh
+
+version=$1
+
+if [ -z "$version" ]; do
+    echo "$0: kernel version required"
+    exit 1
+done
+
+rm -fR "/ostree/modules/${version}"
+rm -fR "/boot/initramfs-ostree-${version}.img"
